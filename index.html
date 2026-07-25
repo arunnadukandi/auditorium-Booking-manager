@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Auditorium Booking Register</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #0f1419; }
+  * { box-sizing: border-box; }
+  input, select, button { font-family: inherit; }
+  input:focus, select:focus { outline: 2px solid #d4a94a; outline-offset: 1px; }
+  button:focus-visible { outline: 2px solid #d4a94a; outline-offset: 2px; }
+  @media (max-width: 640px) { .hide-mobile { display: none; } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  // ====== REQUIRED SETUP ======
+  // Paste your deployed Google Apps Script Web App URL here (ends in /exec).
+  // See apps-script-backend.gs for deployment steps.
+  window.APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbybBRXGa2cZ84ZkwQfmbjpdCc3SqFa4RUCs_gkgO9QaHZYcttudHZJlwaQRTL00gb7jKg/exec";
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+// ---------- Backend (Google Apps Script + Sheet, replaces Claude's window.storage) ----------
+const Store = {
+  async get(key) {
+    const res = await fetch(`${window.APPS_SCRIPT_URL}?action=get&key=${encodeURIComponent(key)}`);
+    if (!res.ok) throw new Error("Storage GET failed: " + res.status);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    return data.value; // string or null
+  },
+  async set(key, value) {
+    const res = await fetch(window.APPS_SCRIPT_URL, {
+      method: "POST",
+      // text/plain avoids a CORS preflight against Apps Script, which doesn't handle OPTIONS.
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ key, value }),
+    });
+    if (!res.ok) throw new Error("Storage SET failed: " + res.status);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    return data;
+  },
+};
+
+// ---------- Minimal icon stand-ins (no icon library dependency) ----------
+const mkIcon = (glyph) => ({ size = 14, style = {}, title }) =>
+  <span title={title} style={{ fontSize: size, lineHeight: 1, display: "inline-block", ...style }}>{glyph}</span>;
+const Calendar = mkIcon("📅");
+const Plus = mkIcon("➕");
+const AlertTriangle = mkIcon("⚠️");
+const Trash2 = mkIcon("🗑️");
+const BarChart3 = mkIcon("📊");
+const Clock = mkIcon("🕐");
+const X = mkIcon("✕");
+const CheckCircle2 = mkIcon("✅");
+const ShieldCheck = mkIcon("🛡️");
+const LogOut = mkIcon("↪️");
+const ListChecks = mkIcon("📋");
+const Settings = mkIcon("⚙️");
+const CalendarRange = mkIcon("🗓️");
+const Upload = mkIcon("📤");
+
+const HALL_COLORS = {
+  "Ashoka": { bg: "#123b3a", accent: "#3ecfae", text: "#8fe8d4" },
+  "Chandragupta": { bg: "#3b2f12", accent: "#e0a83e", text: "#f0c876" },
+  "NKN": { bg: "#2a1638", accent: "#a884e8", text: "#cbb2f5" },
+};
+
+const DEFAULT_HALLS = ["Ashoka", "Chandragupta", "NKN"];
+const STORAGE_KEY = "auditorium-bookings";
+const PIN_KEY = "auditorium-admin-pin";
+const LOG_KEY = "auditorium-activity-log";
+const DEFAULT_PIN = "2026";
+const POLL_MS = 20000;
+const MAX_RANGE_DAYS = 60;
+
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+function toMinutes(t) {
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + m;
+}
+function timeOverlaps(aStart, aEnd, bStart, bEnd) {
+  return toMinutes(aStart) < toMinutes(bEnd) && toMinutes(aEnd) > toMinutes(bStart);
+}
+function fmtTime(t) {
+  const [h, m] = t.split(":").map(Number);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+function fmtDate(d) {
+  const dt = new Date(d + "T00:00:00");
+  return dt.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+}
+function fmtDateShort(d) {
+  const dt = new Date(d + "T00:00:00");
+  return dt.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+}
+function fmtWhen(iso) {
+  return new Date(iso).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+function todayLocal() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function effectiveEnd(b) {
+  return b.dateTo || b.dateFrom;
+}
+function normalizeBooking(b) {
+  let next = b;
+  if (!next.dateFrom) {
+    if (next.date) {
+      const { date, ...rest } = next;
+      next = { ...rest, dateFrom: date, dateTo: b.dateTo || null };
+    } else {
+      next = { ...next, dateFrom: todayLocal(), dateTo: null };
+    }
+  }
+  if (next.overrideReason && !next.importNote && /notion source only listed|imported from notion/i.test(next.overrideReason)) {
+    next = { ...next, importNote: next.overrideReason, overrideReason: null };
+  }
+  return next;
+}
+function fmtRange(b) {
+  const end = effectiveEnd(b);
+  if (end === b.dateFrom) return fmtDate(b.dateFrom);
+  return `${fmtDateShort(b.dateFrom)} – ${fmtDate(end)}`;
+}
+function addDays(dateStr, n) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + n);
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+}
+function daySpan(dateFrom, dateTo) {
+  const end = dateTo || dateFrom;
+  const a = new Date(dateFrom + "T00:00:00");
+  const b = new Date(end + "T00:00:00");
+  return Math.round((b - a) / 86400000) + 1;
+}
+function getDateList(dateFrom, dateTo, cap = MAX_RANGE_DAYS) {
+  const end = dateTo || dateFrom;
+  const dates = [];
+  let cursor = dateFrom;
+  let i = 0;
+  while (cursor <= end && i < cap) {
+    dates.push(cursor);
+    cursor = addDays(cursor, 1);
+    i++;
+  }
+  return dates;
+}
+
+function downloadBlob(content, filename, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function bookingsToCSV(bookings) {
+  const headers = ["Ser", "Auditorium", "Date", "Time", "Purpose", "User Dept", "Strength", "Attendees", "Created By", "Role", "Override Reason", "Created At"];
+  const rows = [];
+  let ser = 1;
+  bookings.forEach((b) => {
+    getDateList(b.dateFrom, b.dateTo).forEach((d) => {
+      rows.push([
+        ser++, b.hall, d, `${fmtTime(b.startTime)} - ${fmtTime(b.endTime)}`, b.purpose, b.requestedBy,
+        b.strength || "", b.attendees || "", b.createdBy, b.createdByRole, b.overrideReason || "", b.createdAt,
+      ]);
+    });
+  });
+  const escape = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  return [headers, ...rows].map((r) => r.map(escape).join(",")).join("\n");
+}
+
+const inputStyle = { width: "100%", marginTop: 4, padding: 10, borderRadius: 6, background: "#0f1419", border: "1px solid #2a3138", color: "#e8ecef", fontSize: 14 };
+const labelStyle = { fontSize: 12, color: "#8b959e" };
+
+function App() {
+  const [halls] = useState(DEFAULT_HALLS);
+  const [bookings, setBookings] = useState([]);
+  const [activityLog, setActivityLog] = useState([]);
+  const [adminPin, setAdminPin] = useState(DEFAULT_PIN);
+  const [view, setView] = useState("calendar");
+  const [loading, setLoading] = useState(true);
+  const [lastSync, setLastSync] = useState(null);
+  const [error, setError] = useState("");
+  const [hallFilter, setHallFilter] = useState("All");
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const failCountRef = useRef(0);
+  const fileInputRef = useRef(null);
+
+  const [session, setSession] = useState(null);
+  const [loginName, setLoginName] = useState("");
+  const [loginRole, setLoginRole] = useState("user");
+  const [loginPin, setLoginPin] = useState("");
+  const [loginError, setLoginError] = useState("");
+
+  const today = todayLocal();
+  const [form, setForm] = useState({
+    hall: DEFAULT_HALLS[0], dateFrom: today, dateTo: "", startTime: "10:00", endTime: "11:00",
+    purpose: "", requestedBy: "", strength: "", attendees: "",
+  });
+  const [conflictInfo, setConflictInfo] = useState(null);
+  const [overrideReason, setOverrideReason] = useState("");
+
+  const [reportHall, setReportHall] = useState("All");
+  const [reportYear, setReportYear] = useState(new Date().getFullYear());
+  const [reportMonth, setReportMonth] = useState("All");
+
+  const [newPin, setNewPin] = useState("");
+  const [restoreStatus, setRestoreStatus] = useState("");
+  const [consolidateStatus, setConsolidateStatus] = useState("");
+
+  const loadData = useCallback(async (isBackground) => {
+    try {
+      if (!isBackground) setLoading(true);
+      const [bRaw, lRaw, pRaw] = await Promise.all([
+        Store.get(STORAGE_KEY).catch(() => null),
+        Store.get(LOG_KEY).catch(() => null),
+        Store.get(PIN_KEY).catch(() => null),
+      ]);
+      let fetchedBookings = bRaw ? JSON.parse(bRaw).map(normalizeBooking) : null;
+      if (!isBackground && fetchedBookings && JSON.stringify(fetchedBookings) !== bRaw) {
+        await Store.set(STORAGE_KEY, JSON.stringify(fetchedBookings)).catch(() => {});
+      }
+      const shouldApplyBookings = fetchedBookings !== null && !(isBackground && fetchedBookings.length === 0 && bookings.length > 0);
+      if (shouldApplyBookings) setBookings(fetchedBookings);
+      if (lRaw) setActivityLog(JSON.parse(lRaw));
+      if (pRaw) setAdminPin(pRaw);
+      setLastSync(new Date());
+      setError("");
+      failCountRef.current = 0;
+    } catch (e) {
+      failCountRef.current += 1;
+      if (!isBackground || failCountRef.current >= 3) {
+        setError("Having trouble reaching the shared store. Check that APPS_SCRIPT_URL is set correctly and the script is deployed with \"Anyone\" access.");
+      }
+    } finally {
+      if (!isBackground) setLoading(false);
+    }
+  }, [bookings.length]);
+
+  useEffect(() => {
+    loadData(false);
+    const interval = setInterval(() => loadData(true), POLL_MS);
+    return () => clearInterval(interval);
+  }, [loadData]);
+
+  async function withRetry(fn, attempts = 2) {
+    let lastErr;
+    for (let i = 0; i < attempts; i++) {
+      try { return await fn(); } catch (e) { lastErr = e; await new Promise((r) => setTimeout(r, 500 * (i + 1))); }
+    }
+    throw lastErr;
+  }
+
+  const persistBookings = async (next) => {
+    setBookings(next);
+    try {
+      await withRetry(() => Store.set(STORAGE_KEY, JSON.stringify(next)));
+      setError("");
+    } catch (e) {
+      setError("Save didn't sync to the shared copy after a couple of tries — check your connection and try again.");
+    }
+  };
+
+  const logAction = async (action, detail) => {
+    const entry = { id: uid(), actorName: session.name, actorRole: session.role, action, detail, timestamp: new Date().toISOString() };
+    const next = [entry, ...activityLog].slice(0, 300);
+    setActivityLog(next);
+    try { await withRetry(() => Store.set(LOG_KEY, JSON.stringify(next))); } catch (e) {}
+  };
+
+  const handleLogin = () => {
+    setLoginError("");
+    if (!loginName.trim()) { setLoginError("Enter your name to continue."); return; }
+    if (loginRole === "admin" && loginPin !== adminPin) { setLoginError("Incorrect admin PIN."); return; }
+    setSession({ name: loginName.trim(), role: loginRole });
+  };
+  const handleLogout = () => { setSession(null); setLoginName(""); setLoginPin(""); setLoginRole("user"); };
+
+  const findConflicts = (hall, dateFrom, dateTo, startTime, endTime, excludeId) => {
+    const newEnd = dateTo || dateFrom;
+    return bookings.filter((b) => {
+      if (b.id === excludeId || b.hall !== hall) return false;
+      const rangesOverlap = b.dateFrom <= newEnd && effectiveEnd(b) >= dateFrom;
+      return rangesOverlap && timeOverlaps(startTime, endTime, b.startTime, b.endTime);
+    });
+  };
+
+  const doSaveBooking = async (clashes) => {
+    const dateTo = form.dateTo && form.dateTo > form.dateFrom ? form.dateTo : null;
+    const newBooking = {
+      id: uid(), ...form, dateTo, createdBy: session.name, createdByRole: session.role,
+      overrideReason: clashes && clashes.length ? overrideReason.trim() : null, createdAt: new Date().toISOString(),
+    };
+    await persistBookings([...bookings, newBooking].sort((a, b) => (a.dateFrom + a.startTime).localeCompare(b.dateFrom + b.startTime)));
+    const rangeLabel = dateTo ? `${form.dateFrom} to ${dateTo}` : form.dateFrom;
+    await logAction(
+      clashes && clashes.length ? "override_booking" : "create_booking",
+      `${form.hall} · ${rangeLabel} ${form.startTime}-${form.endTime} · "${form.purpose}"${clashes && clashes.length ? ` · reason: ${overrideReason.trim()}` : ""}`
+    );
+    setConflictInfo({ type: "success", message: clashes && clashes.length ? "Booking saved despite conflict (logged as override)." : "Booking confirmed." });
+    setForm({ ...form, purpose: "", requestedBy: "", strength: "", attendees: "", dateTo: "" });
+    setOverrideReason("");
+    setTimeout(() => { setConflictInfo(null); setShowAddForm(false); }, 1300);
+  };
+
+  const handleSubmit = async () => {
+    if (!form.purpose.trim() || !form.requestedBy.trim()) { setConflictInfo({ type: "error", message: "Please fill in purpose and requested-by fields." }); return; }
+    if (toMinutes(form.endTime) <= toMinutes(form.startTime)) { setConflictInfo({ type: "error", message: "End time must be after start time." }); return; }
+    if (form.dateTo && form.dateTo < form.dateFrom) { setConflictInfo({ type: "error", message: '"To" date must be on or after the "From" date.' }); return; }
+    if (form.dateTo && daySpan(form.dateFrom, form.dateTo) > MAX_RANGE_DAYS) { setConflictInfo({ type: "error", message: `That range is over ${MAX_RANGE_DAYS} days — please split it into shorter bookings.` }); return; }
+    const clashes = findConflicts(form.hall, form.dateFrom, form.dateTo || null, form.startTime, form.endTime, null);
+    if (clashes.length > 0) { setConflictInfo({ type: "conflict", clashes }); return; }
+    await doSaveBooking(null);
+  };
+
+  const handleOverrideConfirm = async () => {
+    if (!overrideReason.trim()) { setConflictInfo({ ...conflictInfo, needReason: true }); return; }
+    await doSaveBooking(conflictInfo.clashes);
+  };
+
+  const canDelete = (b) => session.role === "admin" || b.createdBy === session.name;
+  const handleDelete = async (b) => {
+    if (!canDelete(b)) return;
+    await persistBookings(bookings.filter((x) => x.id !== b.id));
+    await logAction("delete_booking", `${b.hall} · ${fmtRange(b)} ${b.startTime}-${b.endTime} · "${b.purpose}" (created by ${b.createdBy})`);
+  };
+
+  const handlePinChange = async () => {
+    if (newPin.trim().length < 4) return;
+    await Store.set(PIN_KEY, newPin.trim()).catch(() => {});
+    setAdminPin(newPin.trim());
+    await logAction("change_admin_pin", "Admin PIN updated");
+    setNewPin(""); setShowSettings(false);
+  };
+
+  // Restores a JSON backup exported from the previous (Claude artifact) version of this app,
+  // or any earlier backup from this app — a one-time migration path, not a recurring sync.
+  const handleRestoreFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      try {
+        const parsed = JSON.parse(evt.target.result);
+        const incoming = (parsed.bookings || parsed).map(normalizeBooking);
+        const existingIds = new Set(bookings.map((b) => b.id));
+        const toAdd = incoming.filter((b) => !existingIds.has(b.id));
+        if (toAdd.length === 0) { setRestoreStatus("Nothing new to restore — all records already present."); return; }
+        const next = [...bookings, ...toAdd].sort((a, b) => (a.dateFrom + a.startTime).localeCompare(b.dateFrom + b.startTime));
+        await persistBookings(next);
+        await logAction("restore_backup", `Restored ${toAdd.length} record(s) from uploaded backup file`);
+        setRestoreStatus(`Restored ${toAdd.length} record(s).`);
+      } catch (err) {
+        setRestoreStatus("Couldn't read that file — make sure it's a JSON export from this app.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const findConsolidationGroups = () => {
+    const byKey = {};
+    bookings.forEach((b) => {
+      const key = [b.hall, b.purpose.trim().replace(/\s+/g, " ").toLowerCase(), b.startTime, b.endTime].join("|");
+      (byKey[key] = byKey[key] || []).push(b);
+    });
+    const groups = [];
+    Object.values(byKey).forEach((members) => {
+      if (members.length < 2) return;
+      const sorted = [...members].sort((a, b) => a.dateFrom.localeCompare(b.dateFrom));
+      let chain = [sorted[0]];
+      let runningEnd = effectiveEnd(sorted[0]);
+      for (let i = 1; i < sorted.length; i++) {
+        const b = sorted[i];
+        if (b.dateFrom <= addDays(runningEnd, 1)) {
+          chain.push(b);
+          if (effectiveEnd(b) > runningEnd) runningEnd = effectiveEnd(b);
+        } else {
+          if (chain.length > 1) groups.push(chain);
+          chain = [b]; runningEnd = effectiveEnd(b);
+        }
+      }
+      if (chain.length > 1) groups.push(chain);
+    });
+    return groups;
+  };
+
+  const handleConsolidate = async () => {
+    const groups = findConsolidationGroups();
+    if (groups.length === 0) { setConsolidateStatus("No consecutive same-event bookings found to merge."); return; }
+    const idsToRemove = new Set();
+    const merged = groups.map((chain) => {
+      chain.forEach((b) => idsToRemove.add(b.id));
+      const first = chain[0];
+      const dateFrom = chain.reduce((min, b) => (b.dateFrom < min ? b.dateFrom : min), first.dateFrom);
+      const dateTo = chain.reduce((max, b) => (effectiveEnd(b) > max ? effectiveEnd(b) : max), effectiveEnd(first));
+      const distinctRequesters = [...new Set(chain.map((b) => (b.requestedBy || "").trim()).filter(Boolean))];
+      const requesterNote = distinctRequesters.length > 1 ? ` · requester text varied across entries: ${distinctRequesters.join(" / ")}` : "";
+      return {
+        ...first, id: uid(), dateFrom, dateTo: dateTo !== dateFrom ? dateTo : null,
+        strength: chain.find((b) => b.strength)?.strength ?? first.strength,
+        attendees: chain.find((b) => b.attendees)?.attendees ?? first.attendees,
+        createdBy: "Consolidated", createdByRole: "admin",
+        importNote: `Merged from ${chain.length} separate same-event entries (${chain.map((b) => b.dateFrom).join(", ")})${requesterNote}`,
+        createdAt: new Date().toISOString(),
+      };
+    });
+    const remaining = bookings.filter((b) => !idsToRemove.has(b.id));
+    const next = [...remaining, ...merged].sort((a, b) => (a.dateFrom + a.startTime).localeCompare(b.dateFrom + b.startTime));
+    await persistBookings(next);
+    await logAction("consolidate_bookings", `Merged ${idsToRemove.size} entries into ${merged.length} multi-day booking(s)`);
+    setConsolidateStatus(`Merged ${idsToRemove.size} entries into ${merged.length} multi-day booking(s).`);
+  };
+
+  const upcomingBookings = useMemo(() =>
+    bookings.filter((b) => effectiveEnd(b) >= today && (hallFilter === "All" || b.hall === hallFilter)).sort((a, b) => (a.dateFrom + a.startTime).localeCompare(b.dateFrom + b.startTime)),
+    [bookings, hallFilter, today]);
+
+  const pastBookings = useMemo(() =>
+    bookings.filter((b) => effectiveEnd(b) < today && (hallFilter === "All" || b.hall === hallFilter)).sort((a, b) => (b.dateFrom + b.startTime).localeCompare(a.dateFrom + a.startTime)),
+    [bookings, hallFilter, today]);
+
+  const grouped = useMemo(() => {
+    const groups = {};
+    upcomingBookings.forEach((b) => {
+      const end = effectiveEnd(b);
+      const start = b.dateFrom > today ? b.dateFrom : today;
+      const fullList = getDateList(b.dateFrom, end);
+      const totalDays = fullList.length;
+      getDateList(start, end).forEach((d) => {
+        if (!groups[d]) groups[d] = [];
+        const dayIndex = fullList.indexOf(d) + 1;
+        groups[d].push({ ...b, __dayIndex: dayIndex, __totalDays: totalDays });
+      });
+    });
+    return groups;
+  }, [upcomingBookings, today]);
+
+  const reportData = useMemo(() => {
+    const months = Array.from({ length: 12 }, (_, i) => ({ month: new Date(2000, i, 1).toLocaleString("en-IN", { month: "short" }), count: 0, hours: 0 }));
+    let totalCount = 0, totalHours = 0;
+    const filteredBookings = bookings.filter((b) => reportHall === "All" || b.hall === reportHall);
+    filteredBookings.forEach((b) => {
+      const durationHrs = (toMinutes(b.endTime) - toMinutes(b.startTime)) / 60;
+      getDateList(b.dateFrom, b.dateTo).forEach((d) => {
+        if (Number(d.slice(0, 4)) !== reportYear) return;
+        const m = Number(d.slice(5, 7)) - 1;
+        months[m].count += 1; months[m].hours += durationHrs;
+        totalCount += 1; totalHours += durationHrs;
+      });
+    });
+    let days = null;
+    if (reportMonth !== "All") {
+      const mIdx = Number(reportMonth);
+      const daysInMonth = new Date(reportYear, mIdx + 1, 0).getDate();
+      days = Array.from({ length: daysInMonth }, (_, i) => ({ day: i + 1, count: 0, hours: 0 }));
+      filteredBookings.forEach((b) => {
+        const durationHrs = (toMinutes(b.endTime) - toMinutes(b.startTime)) / 60;
+        getDateList(b.dateFrom, b.dateTo).forEach((d) => {
+          if (Number(d.slice(0, 4)) !== reportYear || Number(d.slice(5, 7)) - 1 !== mIdx) return;
+          const dayNum = Number(d.slice(8, 10));
+          days[dayNum - 1].count += 1; days[dayNum - 1].hours += durationHrs;
+        });
+      });
+    }
+    const maxCount = Math.max(1, ...months.map((m) => m.count));
+    const monthTotalCount = reportMonth !== "All" ? months[Number(reportMonth)].count : totalCount;
+    const monthTotalHours = reportMonth !== "All" ? months[Number(reportMonth)].hours : totalHours;
+    return { months, days, totalCount: monthTotalCount, totalHours: monthTotalHours, maxCount, dayMax: days ? Math.max(1, ...days.map((d) => d.count)) : 1 };
+  }, [bookings, reportHall, reportYear, reportMonth]);
+
+  const years = useMemo(() => {
+    const s = new Set();
+    bookings.forEach((b) => { s.add(Number(b.dateFrom.slice(0, 4))); s.add(Number(effectiveEnd(b).slice(0, 4))); });
+    s.add(new Date().getFullYear());
+    return Array.from(s).sort((a, b) => b - a);
+  }, [bookings]);
+
+  const hallColor = (h) => HALL_COLORS[h] || { bg: "#2a2a2a", accent: "#999", text: "#ccc" };
+
+  if (!session) {
+    return (
+      <div style={{ minHeight: "100vh", background: "#0f1419", color: "#e8ecef", fontFamily: "'Segoe UI', system-ui, sans-serif", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+        <div style={{ width: "100%", maxWidth: 380, background: "#161c23", border: "1px solid #2a3138", borderRadius: 10, padding: 28 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            <ShieldCheck size={18} style={{ color: "#d4a94a" }} />
+            <div style={{ fontSize: 11, letterSpacing: 2, color: "#d4a94a", textTransform: "uppercase", fontWeight: 700 }}>Sign In</div>
+          </div>
+          <h1 style={{ margin: "2px 0 20px", fontSize: 19, fontWeight: 700 }}>Auditorium Booking Register</h1>
+          <label style={labelStyle}>Your name
+            <input style={inputStyle} type="text" value={loginName} onChange={(e) => setLoginName(e.target.value)} placeholder="e.g. R. Sharma" />
+          </label>
+          <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+            {["user", "admin"].map((r) => (
+              <button key={r} onClick={() => setLoginRole(r)} style={{
+                flex: 1, padding: "9px", borderRadius: 6, cursor: "pointer", fontWeight: 700, fontSize: 13,
+                border: loginRole === r ? "1px solid #d4a94a" : "1px solid #2a3138",
+                background: loginRole === r ? "#2a2313" : "transparent",
+                color: loginRole === r ? "#d4a94a" : "#8b959e",
+              }}>{r === "user" ? "Staff" : "Admin"}</button>
+            ))}
+          </div>
+          {loginRole === "admin" && (
+            <label style={{ ...labelStyle, display: "block", marginTop: 12 }}>Admin PIN
+              <input style={inputStyle} type="password" value={loginPin} onChange={(e) => setLoginPin(e.target.value)} placeholder="Enter PIN" />
+            </label>
+          )}
+          {loginError && (
+            <div style={{ marginTop: 12, display: "flex", gap: 8, padding: 10, borderRadius: 6, background: "#3b1f1f", border: "1px solid #6b3333", fontSize: 12, color: "#f0a8a8" }}>
+              <AlertTriangle size={14} /> {loginError}
+            </div>
+          )}
+          <button onClick={handleLogin} style={{ width: "100%", marginTop: 18, padding: 11, borderRadius: 6, border: "none", background: "#d4a94a", color: "#141a21", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Continue</button>
+          <div style={{ marginTop: 16, fontSize: 11, color: "#5d6670", lineHeight: 1.5 }}>
+            This checks name and PIN in-app for accountability and an activity log — it is not encrypted authentication. Don't reuse a sensitive password as the admin PIN.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#0f1419", color: "#e8ecef", fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
+      <div style={{ borderBottom: "1px solid #2a3138", background: "#141a21", padding: "16px 20px" }}>
+        <div style={{ maxWidth: 900, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 11, letterSpacing: 2, color: "#d4a94a", textTransform: "uppercase", fontWeight: 600 }}>Facility Scheduling</div>
+            <h1 style={{ margin: "2px 0 0", fontSize: 22, fontWeight: 700, color: "#f2f2f0" }}>Auditorium Booking Register</h1>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <div style={{ fontSize: 12, color: "#9aa4ad", textAlign: "right" }}>
+              <div style={{ fontWeight: 700, color: "#e8ecef" }}>{session.name}</div>
+              <div style={{ textTransform: "uppercase", letterSpacing: 1, fontSize: 10, color: session.role === "admin" ? "#d4a94a" : "#7d8891" }}>{session.role}</div>
+            </div>
+            {session.role === "admin" && (
+              <button onClick={() => setShowSettings(true)} style={{ background: "none", border: "1px solid #2a3138", borderRadius: 6, padding: 7, color: "#8b959e", cursor: "pointer" }}><Settings size={15} /></button>
+            )}
+            <button onClick={handleLogout} style={{ background: "none", border: "1px solid #2a3138", borderRadius: 6, padding: 7, color: "#8b959e", cursor: "pointer" }}><LogOut size={15} /></button>
+          </div>
+        </div>
+      </div>
+
+      {error && <div style={{ maxWidth: 900, margin: "12px auto 0", padding: "10px 16px", background: "#3b1f1f", border: "1px solid #6b3333", borderRadius: 6, fontSize: 13, color: "#f0a8a8" }}>{error}</div>}
+
+      <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px" }}>
+        <div style={{ display: "flex", gap: 4, marginBottom: 20, background: "#161c23", padding: 4, borderRadius: 8, width: "fit-content", flexWrap: "wrap" }}>
+          {[{ key: "calendar", label: "Bookings", icon: Calendar }, { key: "reports", label: "Usage Reports", icon: BarChart3 }, { key: "log", label: "Activity Log", icon: ListChecks }].map((t) => (
+            <button key={t.key} onClick={() => setView(t.key)} style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 6, border: "none",
+              background: view === t.key ? "#d4a94a" : "transparent", color: view === t.key ? "#141a21" : "#9aa4ad", fontWeight: 600, fontSize: 13, cursor: "pointer",
+            }}><t.icon size={14} /> {t.label}</button>
+          ))}
+        </div>
+
+        {view === "calendar" && (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {["All", ...halls].map((h) => (
+                  <button key={h} onClick={() => setHallFilter(h)} style={{
+                    padding: "6px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                    border: hallFilter === h ? `1px solid ${hallColor(h).accent}` : "1px solid #2a3138",
+                    background: hallFilter === h ? hallColor(h).bg : "transparent", color: hallFilter === h ? hallColor(h).text : "#8b959e",
+                  }}>{h}</button>
+                ))}
+              </div>
+              <button onClick={() => setShowAddForm(true)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 6, border: "none", background: "#d4a94a", color: "#141a21", fontWeight: 700, fontSize: 13, cursor: "pointer" }}><Plus size={15} /> New Booking</button>
+            </div>
+
+            {loading ? (
+              <div style={{ textAlign: "center", padding: 40, color: "#6b7580" }}>Loading bookings…</div>
+            ) : Object.keys(grouped).length === 0 ? (
+              <div style={{ textAlign: "center", padding: 40, color: "#6b7580", border: "1px dashed #2a3138", borderRadius: 8 }}>No upcoming bookings{hallFilter !== "All" ? ` for ${hallFilter}` : ""}. Tap "New Booking" to add one.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+                {Object.keys(grouped).sort().map((date) => (
+                  <div key={date}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#8b959e", marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>{fmtDate(date)}</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {grouped[date].map((b) => {
+                        const c = hallColor(b.hall);
+                        const isMultiDay = b.__totalDays > 1;
+                        return (
+                          <div key={b.id + date} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 8, background: "#161c23", border: "1px solid #23292f", borderLeft: `3px solid ${c.accent}` }}>
+                            <div style={{ minWidth: 78, padding: "4px 8px", borderRadius: 4, background: c.bg, color: c.text, fontSize: 11, fontWeight: 700, textAlign: "center" }}>{b.hall}</div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 14, fontWeight: 600, color: "#e8ecef", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.purpose}</div>
+                              {(isMultiDay || b.overrideReason || b.importNote) && (
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 3 }}>
+                                  {isMultiDay && (
+                                    <span title={`Runs ${fmtRange(b)}`} style={{ color: "#8fe8d4", fontSize: 11, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 3, whiteSpace: "nowrap" }}>
+                                      <CalendarRange size={11} /> Day {b.__dayIndex}/{b.__totalDays}
+                                    </span>
+                                  )}
+                                  {b.overrideReason && <span title={`Override: ${b.overrideReason}`} style={{ color: "#e0a83e", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>⚠ override</span>}
+                                  {b.importNote && <span title={b.importNote} style={{ color: "#7d8891", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>ℹ note</span>}
+                                </div>
+                              )}
+                              <div style={{ fontSize: 12, color: "#7d8891", display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
+                                <Clock size={11} /> {fmtTime(b.startTime)} – {fmtTime(b.endTime)}
+                                <span className="hide-mobile">· {b.requestedBy} · added by {b.createdBy}</span>
+                              </div>
+                            </div>
+                            {canDelete(b) && <button onClick={() => handleDelete(b)} style={{ background: "none", border: "none", color: "#6b7580", cursor: "pointer", padding: 6 }}><Trash2 size={15} /></button>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {pastBookings.length > 0 && (
+              <details style={{ marginTop: 24 }}>
+                <summary style={{ cursor: "pointer", fontSize: 12, color: "#6b7580", fontWeight: 600 }}>Past bookings ({pastBookings.length})</summary>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
+                  {pastBookings.slice(0, 20).map((b) => {
+                    const c = hallColor(b.hall);
+                    return (
+                      <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderRadius: 6, background: "#12161b", fontSize: 12, color: "#7d8891" }}>
+                        <span style={{ color: c.text, fontWeight: 600 }}>{b.hall}</span>
+                        <span>{fmtRange(b)}</span>
+                        <span>{fmtTime(b.startTime)}–{fmtTime(b.endTime)}</span>
+                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.purpose}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </details>
+            )}
+          </>
+        )}
+
+        {view === "reports" && (
+          <div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+              <select value={reportHall} onChange={(e) => setReportHall(e.target.value)} style={{ padding: "8px 12px", borderRadius: 6, background: "#161c23", border: "1px solid #2a3138", color: "#e8ecef", fontSize: 13 }}>
+                <option value="All">All Halls</option>
+                {halls.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+              <select value={reportYear} onChange={(e) => setReportYear(Number(e.target.value))} style={{ padding: "8px 12px", borderRadius: 6, background: "#161c23", border: "1px solid #2a3138", color: "#e8ecef", fontSize: 13 }}>
+                {years.map((y) => <option key={y} value={y}>{y}</option>)}
+              </select>
+              <select value={reportMonth} onChange={(e) => setReportMonth(e.target.value)} style={{ padding: "8px 12px", borderRadius: 6, background: "#161c23", border: "1px solid #2a3138", color: "#e8ecef", fontSize: 13 }}>
+                <option value="All">All Months</option>
+                {reportData.months.map((m, i) => <option key={m.month} value={i}>{m.month}</option>)}
+              </select>
+            </div>
+            <div style={{ display: "flex", gap: 14, marginBottom: 24, flexWrap: "wrap" }}>
+              <div style={{ flex: 1, minWidth: 140, padding: 16, borderRadius: 8, background: "#161c23", border: "1px solid #23292f" }}>
+                <div style={{ fontSize: 11, color: "#7d8891", textTransform: "uppercase", letterSpacing: 1 }}>Booking-Days</div>
+                <div style={{ fontSize: 28, fontWeight: 700, color: "#d4a94a", marginTop: 4 }}>{reportData.totalCount}</div>
+              </div>
+              <div style={{ flex: 1, minWidth: 140, padding: 16, borderRadius: 8, background: "#161c23", border: "1px solid #23292f" }}>
+                <div style={{ fontSize: 11, color: "#7d8891", textTransform: "uppercase", letterSpacing: 1 }}>Total Hours Used</div>
+                <div style={{ fontSize: 28, fontWeight: 700, color: "#3ecfae", marginTop: 4 }}>{reportData.totalHours.toFixed(1)}</div>
+              </div>
+            </div>
+            {reportMonth === "All" ? (
+              <>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#8b959e", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Monthly Breakdown — {reportYear}</div>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 160, padding: "0 4px", borderBottom: "1px solid #2a3138" }}>
+                  {reportData.months.map((m) => (
+                    <div key={m.month} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                      <div style={{ fontSize: 10, color: "#7d8891", marginBottom: 4 }}>{m.count || ""}</div>
+                      <div style={{ width: "70%", height: `${(m.count / reportData.maxCount) * 100}%`, minHeight: m.count > 0 ? 4 : 0, background: "linear-gradient(180deg, #d4a94a, #a87f2e)", borderRadius: "3px 3px 0 0" }} />
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 6, padding: "6px 4px 0" }}>
+                  {reportData.months.map((m) => <div key={m.month} style={{ flex: 1, textAlign: "center", fontSize: 10, color: "#6b7580" }}>{m.month}</div>)}
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#8b959e", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Daily Breakdown — {reportData.months[Number(reportMonth)].month} {reportYear}</div>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 160, padding: "0 4px", borderBottom: "1px solid #2a3138", overflowX: "auto" }}>
+                  {reportData.days.map((d) => (
+                    <div key={d.day} style={{ flex: "1 0 18px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                      <div style={{ fontSize: 9, color: "#7d8891", marginBottom: 4 }}>{d.count || ""}</div>
+                      <div style={{ width: "70%", height: `${(d.count / reportData.dayMax) * 100}%`, minHeight: d.count > 0 ? 4 : 0, background: "linear-gradient(180deg, #3ecfae, #1f7a68)", borderRadius: "3px 3px 0 0" }} title={`${d.day}: ${d.count} booking-day(s), ${d.hours.toFixed(1)}h`} />
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 3, padding: "6px 4px 0" }}>
+                  {reportData.days.map((d) => <div key={d.day} style={{ flex: "1 0 18px", textAlign: "center", fontSize: 8, color: "#6b7580" }}>{d.day}</div>)}
+                </div>
+              </>
+            )}
+            <div style={{ marginTop: 10, fontSize: 11, color: "#5d6670" }}>"Booking-days" counts each day a multi-day event runs, not each booking entry.</div>
+          </div>
+        )}
+
+        {view === "log" && (
+          <div>
+            <div style={{ fontSize: 12, color: "#7d8891", marginBottom: 14 }}>Every create, override, delete, and PIN change is recorded here with who did it and when.</div>
+            {activityLog.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 40, color: "#6b7580", border: "1px dashed #2a3138", borderRadius: 8 }}>No activity yet.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {activityLog.map((l) => (
+                  <div key={l.id} style={{ padding: "10px 12px", borderRadius: 6, background: "#161c23", border: "1px solid #23292f", fontSize: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", color: "#7d8891", marginBottom: 3 }}>
+                      <span><strong style={{ color: "#e8ecef" }}>{l.actorName}</strong> ({l.actorRole}) — <span style={{ color: l.action === "delete_booking" ? "#e08a8a" : l.action === "override_booking" ? "#e0a83e" : "#8fe8c4" }}>{l.action.replace("_", " ")}</span></span>
+                      <span>{fmtWhen(l.timestamp)}</span>
+                    </div>
+                    <div style={{ color: "#9aa4ad" }}>{l.detail}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {showAddForm && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 }}>
+          <div style={{ background: "#161c23", borderRadius: 10, padding: 24, width: "100%", maxWidth: 440, border: "1px solid #2a3138", maxHeight: "90vh", overflowY: "auto" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+              <h2 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>New Booking Request</h2>
+              <button onClick={() => { setShowAddForm(false); setConflictInfo(null); setOverrideReason(""); }} style={{ background: "none", border: "none", color: "#8b959e", cursor: "pointer" }}><X size={18} /></button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <label style={labelStyle}>Hall
+                <select value={form.hall} onChange={(e) => setForm({ ...form, hall: e.target.value })} style={inputStyle}>
+                  {halls.map((h) => <option key={h} value={h}>{h}</option>)}
+                </select>
+              </label>
+              <div style={{ display: "flex", gap: 10 }}>
+                <label style={{ ...labelStyle, flex: 1 }}>Date From
+                  <input type="date" value={form.dateFrom} onChange={(e) => setForm({ ...form, dateFrom: e.target.value })} style={inputStyle} />
+                </label>
+                <label style={{ ...labelStyle, flex: 1 }}>Date To <span style={{ opacity: 0.6 }}>(optional)</span>
+                  <input type="date" value={form.dateTo} min={form.dateFrom} onChange={(e) => setForm({ ...form, dateTo: e.target.value })} style={inputStyle} />
+                </label>
+              </div>
+              {form.dateTo && form.dateTo > form.dateFrom && (
+                <div style={{ fontSize: 11, color: "#8fe8d4", display: "flex", alignItems: "center", gap: 4, marginTop: -6 }}>
+                  <CalendarRange size={12} /> Spans {daySpan(form.dateFrom, form.dateTo)} days, same time each day.
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 10 }}>
+                <label style={{ ...labelStyle, flex: 1 }}>Start
+                  <input type="time" value={form.startTime} onChange={(e) => setForm({ ...form, startTime: e.target.value })} style={inputStyle} />
+                </label>
+                <label style={{ ...labelStyle, flex: 1 }}>End
+                  <input type="time" value={form.endTime} onChange={(e) => setForm({ ...form, endTime: e.target.value })} style={inputStyle} />
+                </label>
+              </div>
+              <label style={labelStyle}>Purpose / Event
+                <input type="text" value={form.purpose} onChange={(e) => setForm({ ...form, purpose: e.target.value })} placeholder="e.g. Annual review meeting" style={inputStyle} />
+              </label>
+              <label style={labelStyle}>Requested By
+                <input type="text" value={form.requestedBy} onChange={(e) => setForm({ ...form, requestedBy: e.target.value })} placeholder="Name / department" style={inputStyle} />
+              </label>
+              <div style={{ display: "flex", gap: 10 }}>
+                <label style={{ ...labelStyle, flex: 1 }}>Strength (headcount)
+                  <input type="number" min="0" value={form.strength} onChange={(e) => setForm({ ...form, strength: e.target.value })} placeholder="Optional" style={inputStyle} />
+                </label>
+                <label style={{ ...labelStyle, flex: 1 }}>Attendees
+                  <input type="text" value={form.attendees} onChange={(e) => setForm({ ...form, attendees: e.target.value })} placeholder="Optional, e.g. names/units" style={inputStyle} />
+                </label>
+              </div>
+
+              {conflictInfo && conflictInfo.type === "error" && (
+                <div style={{ display: "flex", gap: 8, padding: 10, borderRadius: 6, background: "#3b1f1f", border: "1px solid #6b3333", fontSize: 12, color: "#f0a8a8" }}><AlertTriangle size={15} /> {conflictInfo.message}</div>
+              )}
+              {conflictInfo && conflictInfo.type === "conflict" && (
+                <div style={{ padding: 10, borderRadius: 6, background: "#3b1f1f", border: "1px solid #6b3333" }}>
+                  <div style={{ display: "flex", gap: 8, fontSize: 12, color: "#f0a8a8", fontWeight: 700, marginBottom: 6 }}><AlertTriangle size={15} /> Clashes with existing booking(s):</div>
+                  {conflictInfo.clashes.map((c) => (
+                    <div key={c.id} style={{ fontSize: 12, color: "#e0a8a8", marginLeft: 22 }}>{fmtRange(c)} · {fmtTime(c.startTime)}–{fmtTime(c.endTime)} · {c.purpose} ({c.requestedBy})</div>
+                  ))}
+                  {session.role === "admin" ? (
+                    <div style={{ marginTop: 10 }}>
+                      <label style={{ fontSize: 12, color: "#e0a8a8" }}>Reason for override (required, logged)
+                        <input type="text" value={overrideReason} onChange={(e) => setOverrideReason(e.target.value)} placeholder="e.g. VIP event takes priority" style={inputStyle} />
+                      </label>
+                      {conflictInfo.needReason && <div style={{ fontSize: 11, color: "#f0a8a8", marginTop: 4 }}>A reason is required to override.</div>}
+                      <button onClick={handleOverrideConfirm} style={{ marginTop: 10, width: "100%", padding: 10, borderRadius: 6, border: "1px solid #e0a83e", background: "transparent", color: "#e0a83e", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Override & Save Anyway</button>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 11, color: "#e0a8a8", marginTop: 8 }}>Only an admin can override a scheduling conflict. Pick a different time, or ask an admin to review.</div>
+                  )}
+                </div>
+              )}
+              {conflictInfo && conflictInfo.type === "success" && (
+                <div style={{ display: "flex", gap: 8, padding: 10, borderRadius: 6, background: "#1a3b2e", border: "1px solid #2e6b4a", fontSize: 12, color: "#8fe8c4" }}><CheckCircle2 size={15} /> {conflictInfo.message}</div>
+              )}
+              {(!conflictInfo || conflictInfo.type !== "conflict") && (
+                <button onClick={handleSubmit} style={{ marginTop: 6, padding: 11, borderRadius: 6, border: "none", background: "#d4a94a", color: "#141a21", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Confirm Booking</button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSettings && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 }}>
+          <div style={{ background: "#161c23", borderRadius: 10, padding: 24, width: "100%", maxWidth: 380, border: "1px solid #2a3138", maxHeight: "90vh", overflowY: "auto" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>Admin Settings</h2>
+              <button onClick={() => setShowSettings(false)} style={{ background: "none", border: "none", color: "#8b959e", cursor: "pointer" }}><X size={18} /></button>
+            </div>
+            <label style={labelStyle}>Change admin PIN
+              <input type="text" value={newPin} onChange={(e) => setNewPin(e.target.value)} placeholder="New PIN (min 4 characters)" style={inputStyle} />
+            </label>
+            <button onClick={handlePinChange} style={{ marginTop: 12, width: "100%", padding: 10, borderRadius: 6, border: "none", background: "#d4a94a", color: "#141a21", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Update PIN</button>
+            <div style={{ marginTop: 10, fontSize: 11, color: "#5d6670" }}>Share the new PIN with other admins directly — it's not emailed automatically.</div>
+
+            <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #2a3138" }}>
+              <div style={{ fontSize: 12, color: "#8b959e", marginBottom: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1 }}>Export Data</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => downloadBlob(bookingsToCSV(bookings), `auditorium-bookings-${new Date().toISOString().slice(0, 10)}.csv`, "text/csv")} style={{ flex: 1, padding: 9, borderRadius: 6, border: "1px solid #2a3138", background: "transparent", color: "#e8ecef", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Download CSV</button>
+                <button onClick={() => downloadBlob(JSON.stringify({ bookings, exportedAt: new Date().toISOString() }, null, 2), `auditorium-bookings-${new Date().toISOString().slice(0, 10)}.json`, "application/json")} style={{ flex: 1, padding: 9, borderRadius: 6, border: "1px solid #2a3138", background: "transparent", color: "#e8ecef", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Download JSON</button>
+              </div>
+              <div style={{ marginTop: 8, fontSize: 11, color: "#5d6670" }}>CSV expands multi-day bookings into one row per day, matching the Notion register.</div>
+            </div>
+
+            <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #2a3138" }}>
+              <div style={{ fontSize: 12, color: "#8b959e", marginBottom: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1 }}>Restore From Backup</div>
+              <input ref={fileInputRef} type="file" accept="application/json" style={{ display: "none" }} onChange={handleRestoreFile} />
+              <button onClick={() => fileInputRef.current.click()} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, width: "100%", padding: 9, borderRadius: 6, border: "1px solid #3ecfae", background: "transparent", color: "#3ecfae", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>
+                <Upload size={13} /> Upload JSON backup
+              </button>
+              {restoreStatus && <div style={{ marginTop: 8, fontSize: 11, color: "#8fe8c4" }}>{restoreStatus}</div>}
+              <div style={{ marginTop: 8, fontSize: 11, color: "#5d6670" }}>
+                One-time migration: upload a JSON export from the previous version of this app to bring your existing bookings into this shared store. Safe to run more than once — already-present records are skipped.
+              </div>
+            </div>
+
+            <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #2a3138" }}>
+              <div style={{ fontSize: 12, color: "#8b959e", marginBottom: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1 }}>Consolidate Multi-Day Events</div>
+              <button onClick={handleConsolidate} style={{ width: "100%", padding: 9, borderRadius: 6, border: "1px solid #d4a94a", background: "transparent", color: "#d4a94a", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Merge consecutive same-event bookings</button>
+              {consolidateStatus && <div style={{ marginTop: 8, fontSize: 11, color: "#8fe8c4" }}>{consolidateStatus}</div>}
+              <div style={{ marginTop: 8, fontSize: 11, color: "#5d6670" }}>Finds separate single-day entries with the same hall, purpose, and time on consecutive dates and merges them into one real multi-day booking.</div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
