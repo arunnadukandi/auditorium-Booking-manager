@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -312,22 +313,29 @@ function App() {
     });
   };
 
-  const doSaveBooking = async (clashes) => {
+  const doSaveBooking = async (clashes, asPending) => {
     const dateTo = form.dateTo && form.dateTo > form.dateFrom ? form.dateTo : null;
     const newBooking = {
       id: uid(), ...form, dateTo, createdBy: session.name, createdByRole: session.role,
-      overrideReason: clashes && clashes.length ? overrideReason.trim() : null, createdAt: new Date().toISOString(),
+      status: asPending ? "pending" : "confirmed",
+      overrideReason: !asPending && clashes && clashes.length ? overrideReason.trim() : null,
+      conflictSnapshot: asPending && clashes ? clashes.map((c) => ({ purpose: c.purpose, dateFrom: c.dateFrom, dateTo: c.dateTo, startTime: c.startTime, endTime: c.endTime, requestedBy: c.requestedBy })) : null,
+      createdAt: new Date().toISOString(),
     };
     await persistBookings([...bookings, newBooking].sort((a, b) => (a.dateFrom + a.startTime).localeCompare(b.dateFrom + b.startTime)));
     const rangeLabel = dateTo ? `${form.dateFrom} to ${dateTo}` : form.dateFrom;
     await logAction(
-      clashes && clashes.length ? "override_booking" : "create_booking",
-      `${form.hall} · ${rangeLabel} ${form.startTime}-${form.endTime} · "${form.purpose}"${clashes && clashes.length ? ` · reason: ${overrideReason.trim()}` : ""}`
+      asPending ? "flag_conflict" : (clashes && clashes.length ? "override_booking" : "create_booking"),
+      `${form.hall} · ${rangeLabel} ${form.startTime}-${form.endTime} · "${form.purpose}"${!asPending && clashes && clashes.length ? ` · reason: ${overrideReason.trim()}` : ""}${asPending ? ` · clashes with ${clashes.length} existing booking(s), awaiting admin decision` : ""}`
     );
-    setConflictInfo({ type: "success", message: clashes && clashes.length ? "Booking saved despite conflict (logged as override)." : "Booking confirmed." });
+    setConflictInfo({ type: "success", message: asPending ? "Flagged and submitted for admin review — it'll show in red until an admin approves or declines it." : (clashes && clashes.length ? "Booking saved despite conflict (logged as override)." : "Booking confirmed.") });
     setForm({ ...form, purpose: "", requestedBy: "", strength: "", attendees: "", dateTo: "" });
     setOverrideReason("");
     setTimeout(() => { setConflictInfo(null); setShowAddForm(false); }, 1300);
+  };
+
+  const handleFlagForReview = async () => {
+    await doSaveBooking(conflictInfo.clashes, true);
   };
 
   const handleSubmit = async () => {
@@ -337,12 +345,12 @@ function App() {
     if (form.dateTo && daySpan(form.dateFrom, form.dateTo) > MAX_RANGE_DAYS) { setConflictInfo({ type: "error", message: `That range is over ${MAX_RANGE_DAYS} days — please split it into shorter bookings.` }); return; }
     const clashes = findConflicts(form.hall, form.dateFrom, form.dateTo || null, form.startTime, form.endTime, null);
     if (clashes.length > 0) { setConflictInfo({ type: "conflict", clashes }); return; }
-    await doSaveBooking(null);
+    await doSaveBooking(null, false);
   };
 
   const handleOverrideConfirm = async () => {
     if (!overrideReason.trim()) { setConflictInfo({ ...conflictInfo, needReason: true }); return; }
-    await doSaveBooking(conflictInfo.clashes);
+    await doSaveBooking(conflictInfo.clashes, false);
   };
 
   const canDelete = (b) => session.role === "admin" || b.createdBy === session.name;
@@ -350,6 +358,22 @@ function App() {
     if (!canDelete(b)) return;
     await persistBookings(bookings.filter((x) => x.id !== b.id));
     await logAction("delete_booking", `${b.hall} · ${fmtRange(b)} ${b.startTime}-${b.endTime} · "${b.purpose}" (created by ${b.createdBy})`);
+  };
+
+  const [decliningId, setDecliningId] = useState(null);
+  const [declineReason, setDeclineReason] = useState("");
+
+  const handleApprovePending = async (b) => {
+    await persistBookings(bookings.map((x) => (x.id === b.id ? { ...x, status: "confirmed" } : x)));
+    await logAction("approve_conflict", `${b.hall} · ${fmtRange(b)} ${b.startTime}-${b.endTime} · "${b.purpose}" approved despite conflict (requested by ${b.createdBy})`);
+  };
+
+  const handleDeclinePending = async (b) => {
+    if (!declineReason.trim()) return;
+    await persistBookings(bookings.filter((x) => x.id !== b.id));
+    await logAction("decline_conflict", `${b.hall} · ${fmtRange(b)} ${b.startTime}-${b.endTime} · "${b.purpose}" declined (requested by ${b.createdBy}) · reason: ${declineReason.trim()}`);
+    setDecliningId(null);
+    setDeclineReason("");
   };
 
   const handlePinChange = async () => {
@@ -438,6 +462,8 @@ function App() {
     await logAction("consolidate_bookings", `Merged ${idsToRemove.size} entries into ${merged.length} multi-day booking(s)`);
     setConsolidateStatus(`Merged ${idsToRemove.size} entries into ${merged.length} multi-day booking(s).`);
   };
+
+  const pendingBookings = useMemo(() => bookings.filter((b) => b.status === "pending"), [bookings]);
 
   const upcomingBookings = useMemo(() =>
     bookings.filter((b) => effectiveEnd(b) >= today && (hallFilter === "All" || b.hall === hallFilter)).sort((a, b) => (a.dateFrom + a.startTime).localeCompare(b.dateFrom + b.startTime)),
@@ -569,6 +595,13 @@ function App() {
 
       {error && <div style={{ maxWidth: 900, margin: "12px auto 0", padding: "10px 16px", background: "#3b1f1f", border: "1px solid #6b3333", borderRadius: 6, fontSize: 13, color: "#f0a8a8" }}>{error}</div>}
 
+      {pendingBookings.length > 0 && (
+        <div style={{ maxWidth: 900, margin: "12px auto 0", padding: "10px 16px", background: "#3b1f1f", border: "1px solid #c94f4f", borderRadius: 6, fontSize: 13, color: "#ffb3b3", display: "flex", alignItems: "center", gap: 8, fontWeight: 600 }}>
+          <AlertTriangle size={15} />
+          🚩 {pendingBookings.length} booking{pendingBookings.length > 1 ? "s" : ""} flagged with a scheduling conflict — {session.role === "admin" ? "review below and approve or decline." : "awaiting admin review."}
+        </div>
+      )}
+
       <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px" }}>
         <div style={{ display: "flex", gap: 4, marginBottom: 20, background: "#161c23", padding: 4, borderRadius: 8, width: "fit-content", flexWrap: "wrap" }}>
           {[{ key: "calendar", label: "Bookings", icon: Calendar }, { key: "reports", label: "Usage Reports", icon: BarChart3 }, { key: "log", label: "Activity Log", icon: ListChecks }].map((t) => (
@@ -607,28 +640,57 @@ function App() {
                       {grouped[date].map((b) => {
                         const c = hallColor(b.hall);
                         const isMultiDay = b.__totalDays > 1;
+                        const isPending = b.status === "pending";
                         return (
-                          <div key={b.id + date} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 8, background: "#161c23", border: "1px solid #23292f", borderLeft: `3px solid ${c.accent}` }}>
-                            <div style={{ minWidth: 78, padding: "4px 8px", borderRadius: 4, background: c.bg, color: c.text, fontSize: 11, fontWeight: 700, textAlign: "center" }}>{b.hall}</div>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontSize: 14, fontWeight: 600, color: "#e8ecef", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.purpose}</div>
-                              {(isMultiDay || b.overrideReason || b.importNote) && (
-                                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 3 }}>
-                                  {isMultiDay && (
-                                    <span title={`Runs ${fmtRange(b)}`} style={{ color: "#8fe8d4", fontSize: 11, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 3, whiteSpace: "nowrap" }}>
-                                      <CalendarRange size={11} /> Day {b.__dayIndex}/{b.__totalDays}
-                                    </span>
-                                  )}
-                                  {b.overrideReason && <span title={`Override: ${b.overrideReason}`} style={{ color: "#e0a83e", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>⚠ override</span>}
-                                  {b.importNote && <span title={b.importNote} style={{ color: "#7d8891", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>ℹ note</span>}
+                          <div key={b.id + date} style={{ display: "flex", flexDirection: "column", gap: 10, padding: "12px 14px", borderRadius: 8, background: isPending ? "#2a1414" : "#161c23", border: isPending ? "1px solid #c94f4f" : "1px solid #23292f", borderLeft: `3px solid ${isPending ? "#e05a5a" : c.accent}` }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                              <div style={{ minWidth: 78, padding: "4px 8px", borderRadius: 4, background: c.bg, color: c.text, fontSize: 11, fontWeight: 700, textAlign: "center" }}>{b.hall}</div>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 14, fontWeight: 600, color: "#e8ecef", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.purpose}</div>
+                                {(isPending || isMultiDay || b.overrideReason || b.importNote) && (
+                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 3 }}>
+                                    {isPending && (
+                                      <span style={{ color: "#ff8a8a", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>🚩 Conflict — Pending Review</span>
+                                    )}
+                                    {isMultiDay && (
+                                      <span title={`Runs ${fmtRange(b)}`} style={{ color: "#8fe8d4", fontSize: 11, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 3, whiteSpace: "nowrap" }}>
+                                        <CalendarRange size={11} /> Day {b.__dayIndex}/{b.__totalDays}
+                                      </span>
+                                    )}
+                                    {b.overrideReason && <span title={`Override: ${b.overrideReason}`} style={{ color: "#e0a83e", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>⚠ override</span>}
+                                    {b.importNote && <span title={b.importNote} style={{ color: "#7d8891", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>ℹ note</span>}
+                                  </div>
+                                )}
+                                <div style={{ fontSize: 12, color: "#7d8891", display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
+                                  <Clock size={11} /> {fmtTime(b.startTime)} – {fmtTime(b.endTime)}
+                                  <span className="hide-mobile">· {b.requestedBy} · added by {b.createdBy}</span>
                                 </div>
-                              )}
-                              <div style={{ fontSize: 12, color: "#7d8891", display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
-                                <Clock size={11} /> {fmtTime(b.startTime)} – {fmtTime(b.endTime)}
-                                <span className="hide-mobile">· {b.requestedBy} · added by {b.createdBy}</span>
                               </div>
+                              {canDelete(b) && !isPending && <button onClick={() => handleDelete(b)} style={{ background: "none", border: "none", color: "#6b7580", cursor: "pointer", padding: 6 }}><Trash2 size={15} /></button>}
                             </div>
-                            {canDelete(b) && <button onClick={() => handleDelete(b)} style={{ background: "none", border: "none", color: "#6b7580", cursor: "pointer", padding: 6 }}><Trash2 size={15} /></button>}
+
+                            {isPending && b.conflictSnapshot && (
+                              <div style={{ fontSize: 11, color: "#e0a8a8", paddingLeft: 90 }}>
+                                Clashes with: {b.conflictSnapshot.map((c, i) => `${c.purpose} (${fmtTime(c.startTime)}–${fmtTime(c.endTime)})`).join(", ")}
+                              </div>
+                            )}
+
+                            {isPending && session.role === "admin" && (
+                              <div style={{ paddingLeft: 90 }}>
+                                {decliningId === b.id ? (
+                                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                                    <input type="text" value={declineReason} onChange={(e) => setDeclineReason(e.target.value)} placeholder="Reason for declining (required)" style={{ ...inputStyle, width: "auto", flex: 1, minWidth: 160, marginTop: 0 }} />
+                                    <button onClick={() => handleDeclinePending(b)} style={{ padding: "7px 12px", borderRadius: 6, border: "1px solid #e05a5a", background: "transparent", color: "#e05a5a", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Confirm Decline</button>
+                                    <button onClick={() => { setDecliningId(null); setDeclineReason(""); }} style={{ padding: "7px 12px", borderRadius: 6, border: "1px solid #2a3138", background: "transparent", color: "#8b959e", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Cancel</button>
+                                  </div>
+                                ) : (
+                                  <div style={{ display: "flex", gap: 8 }}>
+                                    <button onClick={() => handleApprovePending(b)} style={{ padding: "7px 14px", borderRadius: 6, border: "none", background: "#3ecfae", color: "#0f1419", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>✓ Approve</button>
+                                    <button onClick={() => setDecliningId(b.id)} style={{ padding: "7px 14px", borderRadius: 6, border: "1px solid #e05a5a", background: "transparent", color: "#e05a5a", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>✕ Decline</button>
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
@@ -808,7 +870,10 @@ function App() {
                       <button onClick={handleOverrideConfirm} style={{ marginTop: 10, width: "100%", padding: 10, borderRadius: 6, border: "1px solid #e0a83e", background: "transparent", color: "#e0a83e", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Override & Save Anyway</button>
                     </div>
                   ) : (
-                    <div style={{ fontSize: 11, color: "#e0a8a8", marginTop: 8 }}>Only an admin can override a scheduling conflict. Pick a different time, or ask an admin to review.</div>
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ fontSize: 11, color: "#e0a8a8" }}>Only an admin can immediately override a conflict — but you can submit this anyway for admin review. It'll show up in red for everyone until an admin approves or declines it.</div>
+                      <button onClick={handleFlagForReview} style={{ marginTop: 10, width: "100%", padding: 10, borderRadius: 6, border: "1px solid #e05a5a", background: "transparent", color: "#e05a5a", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>🚩 Flag & Submit for Admin Review</button>
+                    </div>
                   )}
                 </div>
               )}
