@@ -23,7 +23,7 @@
   // ====== REQUIRED SETUP ======
   // Paste your deployed Google Apps Script Web App URL here (ends in /exec).
   // See apps-script-backend.gs for deployment steps.
-  window.APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbybBRXGa2cZ84ZkwQfmbjpdCc3SqFa4RUCs_gkgO9QaHZYcttudHZJlwaQRTL00gb7jKg/exec?action=get&key=auditorium-bookings";
+  window.APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbybBRXGa2cZ84ZkwQfmbjpdCc3SqFa4RUCs_gkgO9QaHZYcttudHZJlwaQRTL00gb7jKg/exec";
 </script>
 
 <script type="text/babel" data-presets="react">
@@ -31,15 +31,21 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 // ---------- Backend (Google Apps Script + Sheet, replaces Claude's window.storage) ----------
 const Store = {
+  _baseUrl() {
+    // Defensive: strips any accidental query string or trailing slash someone
+    // might paste in, so a mistake here fails loudly instead of silently
+    // returning empty data.
+    return window.APPS_SCRIPT_URL.split("?")[0].replace(/\/+$/, "");
+  },
   async get(key) {
-    const res = await fetch(`${window.APPS_SCRIPT_URL}?action=get&key=${encodeURIComponent(key)}`);
+    const res = await fetch(`${this._baseUrl()}?action=get&key=${encodeURIComponent(key)}`);
     if (!res.ok) throw new Error("Storage GET failed: " + res.status);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     return data.value; // string or null
   },
   async set(key, value) {
-    const res = await fetch(window.APPS_SCRIPT_URL, {
+    const res = await fetch(this._baseUrl(), {
       method: "POST",
       // text/plain avoids a CORS preflight against Apps Script, which doesn't handle OPTIONS.
       headers: { "Content-Type": "text/plain;charset=utf-8" },
