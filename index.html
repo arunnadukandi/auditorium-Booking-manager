@@ -583,6 +583,24 @@ function App() {
     return groups;
   }, [upcomingBookings, today]);
 
+  const pastGrouped = useMemo(() => {
+    const groups = {};
+    pastBookings.forEach((b) => {
+      const end = effectiveEnd(b);
+      // Clip the expansion to before today, since anything from today onward
+      // already belongs to the upcoming view above.
+      const clippedEnd = end < today ? end : addDays(today, -1);
+      const fullList = getDateList(b.dateFrom, end);
+      const totalDays = fullList.length;
+      getDateList(b.dateFrom, clippedEnd).forEach((d) => {
+        if (!groups[d]) groups[d] = [];
+        const dayIndex = fullList.indexOf(d) + 1;
+        groups[d].push({ ...b, __dayIndex: dayIndex, __totalDays: totalDays });
+      });
+    });
+    return groups;
+  }, [pastBookings, today]);
+
   const reportData = useMemo(() => {
     const months = Array.from({ length: 12 }, (_, i) => ({ month: new Date(2000, i, 1).toLocaleString("en-IN", { month: "short" }), count: 0, hours: 0 }));
     let totalCount = 0, totalHours = 0;
@@ -759,10 +777,17 @@ function App() {
 
       <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px" }}>
         <div style={{ display: "flex", gap: 4, marginBottom: 20, background: "#161c23", padding: 4, borderRadius: 8, width: "fit-content", flexWrap: "wrap" }}>
-          {[{ key: "calendar", label: "Bookings", icon: Calendar }, { key: "reports", label: "Usage Reports", icon: BarChart3 }, { key: "log", label: "Activity Log", icon: ListChecks }].map((t) => (
+          {[
+            { key: "calendar", label: "Bookings", icon: Calendar },
+            { key: "reports", label: "Usage Reports", icon: BarChart3 },
+            { key: "log", label: "Activity Log", icon: ListChecks },
+            { key: "review", label: allPendingCount > 0 ? `Needs Review (${allPendingCount})` : "Needs Review", icon: AlertTriangle },
+          ].map((t) => (
             <button key={t.key} onClick={() => setView(t.key)} style={{
               display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 6, border: "none",
-              background: view === t.key ? "#d4a94a" : "transparent", color: view === t.key ? "#141a21" : "#9aa4ad", fontWeight: 600, fontSize: 13, cursor: "pointer",
+              background: view === t.key ? (t.key === "review" && allPendingCount > 0 ? "#c94f4f" : "#d4a94a") : "transparent",
+              color: view === t.key ? "#141a21" : (t.key === "review" && allPendingCount > 0 ? "#ff8a8a" : "#9aa4ad"),
+              fontWeight: 600, fontSize: 13, cursor: "pointer",
             }}><t.icon size={14} /> {t.label}</button>
           ))}
         </div>
@@ -781,15 +806,6 @@ function App() {
               </div>
               <button onClick={openNewForm} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 6, border: "none", background: "#d4a94a", color: "#141a21", fontWeight: 700, fontSize: 13, cursor: "pointer" }}><Plus size={15} /> New Booking</button>
             </div>
-
-            {pendingBookings.length > 0 && (
-              <div style={{ marginBottom: 20 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "#ff8a8a", marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>🚩 Needs Review ({pendingBookings.length})</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {pendingBookings.map((b) => renderBookingCard(b, "pending-" + b.id))}
-                </div>
-              </div>
-            )}
 
             {loading ? (
               <div style={{ textAlign: "center", padding: 40, color: "#6b7580" }}>Loading bookings…</div>
@@ -810,23 +826,32 @@ function App() {
 
             {pastBookings.length > 0 && (
               <details style={{ marginTop: 24 }}>
-                <summary style={{ cursor: "pointer", fontSize: 12, color: "#6b7580", fontWeight: 600 }}>Past bookings ({pastBookings.length})</summary>
-                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
-                  {pastBookings.map((b) => {
-                    const c = hallColor(b.hall);
-                    return (
-                      <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderRadius: 6, background: "#12161b", fontSize: 12, color: "#7d8891" }}>
-                        <span style={{ color: c.text, fontWeight: 600 }}>{b.hall}</span>
-                        <span>{fmtRange(b)}</span>
-                        <span>{fmtTime(b.startTime)}–{fmtTime(b.endTime)}</span>
-                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.purpose}</span>
+                <summary style={{ cursor: "pointer", fontSize: 12, color: "#8b959e", fontWeight: 700, textTransform: "uppercase", letterSpacing: 1 }}>Past bookings ({pastBookings.length})</summary>
+                <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 18, opacity: 0.7 }}>
+                  {Object.keys(pastGrouped).sort().reverse().map((date) => (
+                    <div key={date}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7580", marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>{fmtDate(date)}</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {pastGrouped[date].map((b) => renderBookingCard(b, "past-" + b.id + date))}
                       </div>
-                    );
-                  })}
+                    </div>
+                  ))}
                 </div>
               </details>
             )}
           </>
+        )}
+
+        {view === "review" && (
+          <div>
+            {pendingBookings.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 40, color: "#6b7580", border: "1px dashed #2a3138", borderRadius: 8 }}>Nothing awaiting review right now.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {pendingBookings.map((b) => renderBookingCard(b, "pending-" + b.id))}
+              </div>
+            )}
+          </div>
         )}
 
         {view === "reports" && (
