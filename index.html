@@ -196,6 +196,54 @@ function bookingsToCSV(bookings) {
   return [headers, ...rows].map((r) => r.map(escape).join(",")).join("\n");
 }
 
+// Register view: only columns B–J (Hall through Attendees) from the sheet —
+// the fields relevant to a human reading the schedule, excluding internal
+// bookkeeping (id, createdBy, status, override/import notes, timestamps).
+// One row per booking, matching how the sheet itself is structured, not
+// expanded per-day like the internal backup export.
+const REGISTER_COLUMNS = ["Ser", "Auditorium", "Date (From)", "Date (To)", "Time (From)", "Time (To)", "Purpose", "Dept", "Attendees", "Strength"];
+function orDash_(v) { return v === null || v === undefined || v === "" ? "-" : v; }
+function registerRows(bookings) {
+  return bookings
+    .filter((b) => b.status !== "pending")
+    .sort((a, b) => (a.dateFrom + a.startTime).localeCompare(b.dateFrom + b.startTime))
+    .map((b, i) => [
+      i + 1, orDash_(b.hall), orDash_(fmtDate(b.dateFrom)), b.dateTo ? fmtDate(b.dateTo) : "-",
+      orDash_(fmtTime(b.startTime)), orDash_(fmtTime(b.endTime)), orDash_(b.purpose), orDash_(b.requestedBy),
+      orDash_(b.attendees), orDash_(b.strength),
+    ]);
+}
+
+function bookingsToRegisterCSV(bookings) {
+  const rows = registerRows(bookings);
+  const escape = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  return [REGISTER_COLUMNS, ...rows].map((r) => r.map(escape).join(",")).join("\n");
+}
+
+function htmlEscape_(v) {
+  return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function buildRegisterPrintHtml(bookings) {
+  const rows = registerRows(bookings);
+  const bodyRows = rows.map((r) => `<tr>${r.map((c) => `<td>${htmlEscape_(c)}</td>`).join("")}</tr>`).join("");
+  const headerRow = REGISTER_COLUMNS.map((h) => `<th>${htmlEscape_(h)}</th>`).join("");
+  const now = new Date().toLocaleString("en-IN");
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Auditorium Booking Register</title><style>
+    body { font-family: Arial, Helvetica, sans-serif; color: #111; padding: 24px; }
+    h1 { font-size: 18px; margin-bottom: 2px; }
+    .meta { font-size: 11px; color: #555; margin-bottom: 16px; }
+    table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    th, td { border: 1px solid #999; padding: 5px 7px; text-align: left; vertical-align: top; }
+    th { background: #eee; }
+    @media print { body { padding: 0; } }
+  </style></head><body>
+    <h1>Auditorium Booking Register</h1>
+    <div class="meta">Generated ${htmlEscape_(now)} · ${rows.length} booking(s), confirmed only</div>
+    <table><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table>
+  </body></html>`;
+}
+
 const inputStyle = { width: "100%", marginTop: 4, padding: 10, borderRadius: 6, background: "#0f1419", border: "1px solid #2a3138", color: "#e8ecef", fontSize: 14 };
 const labelStyle = { fontSize: 12, color: "#8b959e" };
 
@@ -405,6 +453,26 @@ function App() {
     setAdminPin(newPin.trim());
     await logAction("change_admin_pin", "Admin PIN updated");
     setNewPin(""); setShowSettings(false);
+  };
+
+  // Both admin-only, both logged — a Print/Export of the register is itself
+  // a reportable action (who pulled a copy of the schedule, and when).
+  const handlePrintRegister = async () => {
+    if (session.role !== "admin") return;
+    const html = buildRegisterPrintHtml(bookings);
+    const win = window.open("", "_blank");
+    if (!win) { setError("Pop-up blocked — allow pop-ups for this site to print."); return; }
+    win.document.write(html);
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 300); // brief delay lets the new window finish rendering before print dialog opens
+    await logAction("print_register", `Printed register (${registerRows(bookings).length} confirmed booking(s))`);
+  };
+
+  const handleExportRegister = async () => {
+    if (session.role !== "admin") return;
+    downloadBlob(bookingsToRegisterCSV(bookings), `auditorium-register-${new Date().toISOString().slice(0, 10)}.csv`, "text/csv");
+    await logAction("export_register", `Exported register CSV (${registerRows(bookings).length} confirmed booking(s))`);
   };
 
   // Restores a JSON backup exported from the previous (Claude artifact) version of this app,
@@ -950,7 +1018,18 @@ function App() {
                 <button onClick={() => downloadBlob(bookingsToCSV(bookings), `auditorium-bookings-${new Date().toISOString().slice(0, 10)}.csv`, "text/csv")} style={{ flex: 1, padding: 9, borderRadius: 6, border: "1px solid #2a3138", background: "transparent", color: "#e8ecef", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Download CSV</button>
                 <button onClick={() => downloadBlob(JSON.stringify({ bookings, exportedAt: new Date().toISOString() }, null, 2), `auditorium-bookings-${new Date().toISOString().slice(0, 10)}.json`, "application/json")} style={{ flex: 1, padding: 9, borderRadius: 6, border: "1px solid #2a3138", background: "transparent", color: "#e8ecef", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Download JSON</button>
               </div>
-              <div style={{ marginTop: 8, fontSize: 11, color: "#5d6670" }}>CSV expands multi-day bookings into one row per day, matching the Notion register.</div>
+              <div style={{ marginTop: 8, fontSize: 11, color: "#5d6670" }}>CSV expands multi-day bookings into one row per day, matching the Notion register. Includes every field, for backup/restore purposes.</div>
+            </div>
+
+            <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #2a3138" }}>
+              <div style={{ fontSize: 12, color: "#8b959e", marginBottom: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1 }}>Print / Export Register</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={handlePrintRegister} style={{ flex: 1, padding: 9, borderRadius: 6, border: "1px solid #2a3138", background: "transparent", color: "#e8ecef", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>🖨 Print</button>
+                <button onClick={handleExportRegister} style={{ flex: 1, padding: 9, borderRadius: 6, border: "1px solid #2a3138", background: "transparent", color: "#e8ecef", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Export CSV</button>
+              </div>
+              <div style={{ marginTop: 8, fontSize: 11, color: "#5d6670" }}>
+                A clean, human-readable schedule — Hall through Attendees only, confirmed bookings only, one row per booking. Every print or export is recorded in the Activity Log.
+              </div>
             </div>
 
             <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #2a3138" }}>
