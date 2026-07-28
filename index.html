@@ -486,14 +486,17 @@ function App() {
     setConsolidateStatus(`Merged ${idsToRemove.size} entries into ${merged.length} multi-day booking(s).`);
   };
 
-  const pendingBookings = useMemo(() => bookings.filter((b) => b.status === "pending"), [bookings]);
+  const pendingBookings = useMemo(() =>
+    bookings.filter((b) => b.status === "pending" && (hallFilter === "All" || b.hall === hallFilter)).sort((a, b) => (a.dateFrom + a.startTime).localeCompare(b.dateFrom + b.startTime)),
+    [bookings, hallFilter]);
+  const allPendingCount = useMemo(() => bookings.filter((b) => b.status === "pending").length, [bookings]);
 
   const upcomingBookings = useMemo(() =>
-    bookings.filter((b) => effectiveEnd(b) >= today && (hallFilter === "All" || b.hall === hallFilter)).sort((a, b) => (a.dateFrom + a.startTime).localeCompare(b.dateFrom + b.startTime)),
+    bookings.filter((b) => b.status !== "pending" && effectiveEnd(b) >= today && (hallFilter === "All" || b.hall === hallFilter)).sort((a, b) => (a.dateFrom + a.startTime).localeCompare(b.dateFrom + b.startTime)),
     [bookings, hallFilter, today]);
 
   const pastBookings = useMemo(() =>
-    bookings.filter((b) => effectiveEnd(b) < today && (hallFilter === "All" || b.hall === hallFilter)).sort((a, b) => (b.dateFrom + b.startTime).localeCompare(a.dateFrom + a.startTime)),
+    bookings.filter((b) => b.status !== "pending" && effectiveEnd(b) < today && (hallFilter === "All" || b.hall === hallFilter)).sort((a, b) => (b.dateFrom + b.startTime).localeCompare(a.dateFrom + a.startTime)),
     [bookings, hallFilter, today]);
 
   const grouped = useMemo(() => {
@@ -515,7 +518,7 @@ function App() {
   const reportData = useMemo(() => {
     const months = Array.from({ length: 12 }, (_, i) => ({ month: new Date(2000, i, 1).toLocaleString("en-IN", { month: "short" }), count: 0, hours: 0 }));
     let totalCount = 0, totalHours = 0;
-    const filteredBookings = bookings.filter((b) => reportHall === "All" || b.hall === reportHall);
+    const filteredBookings = bookings.filter((b) => b.status !== "pending" && (reportHall === "All" || b.hall === reportHall));
     filteredBookings.forEach((b) => {
       const durationHrs = (toMinutes(b.endTime) - toMinutes(b.startTime)) / 60;
       getDateList(b.dateFrom, b.dateTo).forEach((d) => {
@@ -553,6 +556,67 @@ function App() {
   }, [bookings]);
 
   const hallColor = (h) => HALL_COLORS[h] || { bg: "#2a2a2a", accent: "#999", text: "#ccc" };
+
+  const renderBookingCard = (b, key) => {
+    const c = hallColor(b.hall);
+    const isMultiDay = b.__totalDays > 1;
+    const isPending = b.status === "pending";
+    return (
+      <div key={key} style={{ display: "flex", flexDirection: "column", gap: 10, padding: "12px 14px", borderRadius: 8, background: isPending ? "#2a1414" : "#161c23", border: isPending ? "1px solid #c94f4f" : "1px solid #23292f", borderLeft: `3px solid ${isPending ? "#e05a5a" : c.accent}` }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ minWidth: 78, padding: "4px 8px", borderRadius: 4, background: c.bg, color: c.text, fontSize: 11, fontWeight: 700, textAlign: "center" }}>{b.hall}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: "#e8ecef", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.purpose}</div>
+            {(isPending || isMultiDay || b.overrideReason || b.importNote) && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 3 }}>
+                {isPending && <span style={{ color: "#ff8a8a", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>🚩 Conflict — Pending Review</span>}
+                {isMultiDay && (
+                  <span title={`Runs ${fmtRange(b)}`} style={{ color: "#8fe8d4", fontSize: 11, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 3, whiteSpace: "nowrap" }}>
+                    <CalendarRange size={11} /> Day {b.__dayIndex}/{b.__totalDays}
+                  </span>
+                )}
+                {b.overrideReason && <span title={`Override: ${b.overrideReason}`} style={{ color: "#e0a83e", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>⚠ override</span>}
+                {b.importNote && <span title={b.importNote} style={{ color: "#7d8891", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>ℹ note</span>}
+              </div>
+            )}
+            <div style={{ fontSize: 12, color: "#7d8891", display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
+              <Clock size={11} /> {isPending ? fmtRange(b) + " · " : ""}{fmtTime(b.startTime)} – {fmtTime(b.endTime)}
+              <span className="hide-mobile">· {b.requestedBy} · added by {b.createdBy}</span>
+            </div>
+          </div>
+          {canModify(b) && (
+            <div style={{ display: "flex", gap: 2 }}>
+              <button onClick={() => openEditForm(b)} title="Edit" style={{ background: "none", border: "none", color: "#6b7580", cursor: "pointer", padding: 6 }}><Edit size={14} /></button>
+              {!isPending && <button onClick={() => handleDelete(b)} title="Delete" style={{ background: "none", border: "none", color: "#6b7580", cursor: "pointer", padding: 6 }}><Trash2 size={15} /></button>}
+            </div>
+          )}
+        </div>
+
+        {isPending && b.conflictSnapshot && (
+          <div style={{ fontSize: 11, color: "#e0a8a8", paddingLeft: 90 }}>
+            Clashes with: {b.conflictSnapshot.map((c2, i) => `${c2.purpose} (${fmtTime(c2.startTime)}–${fmtTime(c2.endTime)})`).join(", ")}
+          </div>
+        )}
+
+        {isPending && session.role === "admin" && (
+          <div style={{ paddingLeft: 90 }}>
+            {decliningId === b.id ? (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <input type="text" value={declineReason} onChange={(e) => setDeclineReason(e.target.value)} placeholder="Reason for declining (required)" style={{ ...inputStyle, width: "auto", flex: 1, minWidth: 160, marginTop: 0 }} />
+                <button onClick={() => handleDeclinePending(b)} style={{ padding: "7px 12px", borderRadius: 6, border: "1px solid #e05a5a", background: "transparent", color: "#e05a5a", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Confirm Decline</button>
+                <button onClick={() => { setDecliningId(null); setDeclineReason(""); }} style={{ padding: "7px 12px", borderRadius: 6, border: "1px solid #2a3138", background: "transparent", color: "#8b959e", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Cancel</button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => handleApprovePending(b)} style={{ padding: "7px 14px", borderRadius: 6, border: "none", background: "#3ecfae", color: "#0f1419", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>✓ Approve</button>
+                <button onClick={() => setDecliningId(b.id)} style={{ padding: "7px 14px", borderRadius: 6, border: "1px solid #e05a5a", background: "transparent", color: "#e05a5a", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>✕ Decline</button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   if (!session) {
     return (
@@ -618,10 +682,10 @@ function App() {
 
       {error && <div style={{ maxWidth: 900, margin: "12px auto 0", padding: "10px 16px", background: "#3b1f1f", border: "1px solid #6b3333", borderRadius: 6, fontSize: 13, color: "#f0a8a8" }}>{error}</div>}
 
-      {pendingBookings.length > 0 && (
+      {allPendingCount > 0 && (
         <div style={{ maxWidth: 900, margin: "12px auto 0", padding: "10px 16px", background: "#3b1f1f", border: "1px solid #c94f4f", borderRadius: 6, fontSize: 13, color: "#ffb3b3", display: "flex", alignItems: "center", gap: 8, fontWeight: 600 }}>
           <AlertTriangle size={15} />
-          🚩 {pendingBookings.length} booking{pendingBookings.length > 1 ? "s" : ""} flagged with a scheduling conflict — {session.role === "admin" ? "review below and approve or decline." : "awaiting admin review."}
+          🚩 {allPendingCount} booking{allPendingCount > 1 ? "s" : ""} flagged with a scheduling conflict — {session.role === "admin" ? "review below and approve or decline." : "awaiting admin review."}
         </div>
       )}
 
@@ -650,6 +714,15 @@ function App() {
               <button onClick={openNewForm} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 6, border: "none", background: "#d4a94a", color: "#141a21", fontWeight: 700, fontSize: 13, cursor: "pointer" }}><Plus size={15} /> New Booking</button>
             </div>
 
+            {pendingBookings.length > 0 && (
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#ff8a8a", marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>🚩 Needs Review ({pendingBookings.length})</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {pendingBookings.map((b) => renderBookingCard(b, "pending-" + b.id))}
+                </div>
+              </div>
+            )}
+
             {loading ? (
               <div style={{ textAlign: "center", padding: 40, color: "#6b7580" }}>Loading bookings…</div>
             ) : Object.keys(grouped).length === 0 ? (
@@ -660,68 +733,7 @@ function App() {
                   <div key={date}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: "#8b959e", marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>{fmtDate(date)}</div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      {grouped[date].map((b) => {
-                        const c = hallColor(b.hall);
-                        const isMultiDay = b.__totalDays > 1;
-                        const isPending = b.status === "pending";
-                        return (
-                          <div key={b.id + date} style={{ display: "flex", flexDirection: "column", gap: 10, padding: "12px 14px", borderRadius: 8, background: isPending ? "#2a1414" : "#161c23", border: isPending ? "1px solid #c94f4f" : "1px solid #23292f", borderLeft: `3px solid ${isPending ? "#e05a5a" : c.accent}` }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                              <div style={{ minWidth: 78, padding: "4px 8px", borderRadius: 4, background: c.bg, color: c.text, fontSize: 11, fontWeight: 700, textAlign: "center" }}>{b.hall}</div>
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontSize: 14, fontWeight: 600, color: "#e8ecef", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.purpose}</div>
-                                {(isPending || isMultiDay || b.overrideReason || b.importNote) && (
-                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 3 }}>
-                                    {isPending && (
-                                      <span style={{ color: "#ff8a8a", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>🚩 Conflict — Pending Review</span>
-                                    )}
-                                    {isMultiDay && (
-                                      <span title={`Runs ${fmtRange(b)}`} style={{ color: "#8fe8d4", fontSize: 11, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 3, whiteSpace: "nowrap" }}>
-                                        <CalendarRange size={11} /> Day {b.__dayIndex}/{b.__totalDays}
-                                      </span>
-                                    )}
-                                    {b.overrideReason && <span title={`Override: ${b.overrideReason}`} style={{ color: "#e0a83e", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>⚠ override</span>}
-                                    {b.importNote && <span title={b.importNote} style={{ color: "#7d8891", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>ℹ note</span>}
-                                  </div>
-                                )}
-                                <div style={{ fontSize: 12, color: "#7d8891", display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
-                                  <Clock size={11} /> {fmtTime(b.startTime)} – {fmtTime(b.endTime)}
-                                  <span className="hide-mobile">· {b.requestedBy} · added by {b.createdBy}</span>
-                                </div>
-                              </div>
-                              {canModify(b) && (
-                                <div style={{ display: "flex", gap: 2 }}>
-                                  <button onClick={() => openEditForm(b)} title="Edit" style={{ background: "none", border: "none", color: "#6b7580", cursor: "pointer", padding: 6 }}><Edit size={14} /></button>
-                                  {!isPending && <button onClick={() => handleDelete(b)} title="Delete" style={{ background: "none", border: "none", color: "#6b7580", cursor: "pointer", padding: 6 }}><Trash2 size={15} /></button>}
-                                </div>
-                              )}
-                            </div>
-
-                            {isPending && b.conflictSnapshot && (
-                              <div style={{ fontSize: 11, color: "#e0a8a8", paddingLeft: 90 }}>
-                                Clashes with: {b.conflictSnapshot.map((c, i) => `${c.purpose} (${fmtTime(c.startTime)}–${fmtTime(c.endTime)})`).join(", ")}
-                              </div>
-                            )}
-
-                            {isPending && session.role === "admin" && (
-                              <div style={{ paddingLeft: 90 }}>
-                                {decliningId === b.id ? (
-                                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                                    <input type="text" value={declineReason} onChange={(e) => setDeclineReason(e.target.value)} placeholder="Reason for declining (required)" style={{ ...inputStyle, width: "auto", flex: 1, minWidth: 160, marginTop: 0 }} />
-                                    <button onClick={() => handleDeclinePending(b)} style={{ padding: "7px 12px", borderRadius: 6, border: "1px solid #e05a5a", background: "transparent", color: "#e05a5a", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Confirm Decline</button>
-                                    <button onClick={() => { setDecliningId(null); setDeclineReason(""); }} style={{ padding: "7px 12px", borderRadius: 6, border: "1px solid #2a3138", background: "transparent", color: "#8b959e", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Cancel</button>
-                                  </div>
-                                ) : (
-                                  <div style={{ display: "flex", gap: 8 }}>
-                                    <button onClick={() => handleApprovePending(b)} style={{ padding: "7px 14px", borderRadius: 6, border: "none", background: "#3ecfae", color: "#0f1419", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>✓ Approve</button>
-                                    <button onClick={() => setDecliningId(b.id)} style={{ padding: "7px 14px", borderRadius: 6, border: "1px solid #e05a5a", background: "transparent", color: "#e05a5a", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>✕ Decline</button>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
+                      {grouped[date].map((b) => renderBookingCard(b, b.id + date))}
                     </div>
                   </div>
                 ))}
@@ -732,7 +744,7 @@ function App() {
               <details style={{ marginTop: 24 }}>
                 <summary style={{ cursor: "pointer", fontSize: 12, color: "#6b7580", fontWeight: 600 }}>Past bookings ({pastBookings.length})</summary>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
-                  {pastBookings.slice(0, 20).map((b) => {
+                  {pastBookings.map((b) => {
                     const c = hallColor(b.hall);
                     return (
                       <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderRadius: 6, background: "#12161b", fontSize: 12, color: "#7d8891" }}>
