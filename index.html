@@ -349,9 +349,20 @@ function App() {
 
   const logAction = async (action, detail) => {
     const entry = { id: uid(), actorName: session.name, actorRole: session.role, action, detail, timestamp: new Date().toISOString() };
-    const next = [entry, ...activityLog].slice(0, 300);
-    setActivityLog(next);
-    try { await withRetry(() => Store.set(LOG_KEY, JSON.stringify(next))); } catch (e) {}
+    try {
+      // Always read the true current log right before writing, rather than trusting
+      // local state — local state can be stale (e.g. right after page load), and
+      // writing a stale/short copy back would silently truncate the real history.
+      const raw = await Store.get(LOG_KEY);
+      const current = raw ? JSON.parse(raw) : [];
+      const next = [entry, ...current].slice(0, 300);
+      setActivityLog(next);
+      await withRetry(() => Store.set(LOG_KEY, JSON.stringify(next)));
+    } catch (e) {
+      // Fetch/write failed — still reflect the action locally so the UI isn't
+      // silently wrong, but don't risk persisting a possibly-incomplete log.
+      setActivityLog((prev) => [entry, ...prev].slice(0, 300));
+    }
   };
 
   const handleLogin = () => {
