@@ -285,9 +285,10 @@ function App() {
   const [conflictInfo, setConflictInfo] = useState(null);
   const [overrideReason, setOverrideReason] = useState("");
 
-  const [reportHall, setReportHall] = useState("All");
+  const [reportHalls, setReportHalls] = useState([...DEFAULT_HALLS]);
   const [reportYear, setReportYear] = useState(new Date().getFullYear());
-  const [reportMonth, setReportMonth] = useState("All");
+  const [reportDateFrom, setReportDateFrom] = useState("");
+  const [reportDateTo, setReportDateTo] = useState("");
 
   const [newPin, setNewPin] = useState("");
   const [restoreStatus, setRestoreStatus] = useState("");
@@ -608,38 +609,96 @@ function App() {
     return groups;
   }, [pastBookings, today]);
 
+  const toggleReportHall = (h) => {
+    if (h === "All") { setReportHalls([...halls]); return; }
+    setReportHalls((prev) => {
+      if (prev.includes(h)) {
+        const next = prev.filter((x) => x !== h);
+        return next.length === 0 ? prev : next; // keep at least one hall selected
+      }
+      return [...prev, h];
+    });
+  };
+  const clearReportRange = () => { setReportDateFrom(""); setReportDateTo(""); };
+
   const reportData = useMemo(() => {
+    const filteredBookings = bookings.filter((b) => b.status !== "pending" && reportHalls.includes(b.hall));
+
+    // Default view (no date range set): monthly breakdown for the selected year.
     const months = Array.from({ length: 12 }, (_, i) => ({ month: new Date(2000, i, 1).toLocaleString("en-IN", { month: "short" }), count: 0, hours: 0 }));
-    let totalCount = 0, totalHours = 0;
-    const filteredBookings = bookings.filter((b) => b.status !== "pending" && (reportHall === "All" || b.hall === reportHall));
+    let yearTotalCount = 0, yearTotalHours = 0;
     filteredBookings.forEach((b) => {
       const durationHrs = (toMinutes(b.endTime) - toMinutes(b.startTime)) / 60;
       getDateList(b.dateFrom, b.dateTo).forEach((d) => {
         if (Number(d.slice(0, 4)) !== reportYear) return;
         const m = Number(d.slice(5, 7)) - 1;
         months[m].count += 1; months[m].hours += durationHrs;
-        totalCount += 1; totalHours += durationHrs;
+        yearTotalCount += 1; yearTotalHours += durationHrs;
       });
     });
-    let days = null;
-    if (reportMonth !== "All") {
-      const mIdx = Number(reportMonth);
-      const daysInMonth = new Date(reportYear, mIdx + 1, 0).getDate();
-      days = Array.from({ length: daysInMonth }, (_, i) => ({ day: i + 1, count: 0, hours: 0 }));
-      filteredBookings.forEach((b) => {
-        const durationHrs = (toMinutes(b.endTime) - toMinutes(b.startTime)) / 60;
-        getDateList(b.dateFrom, b.dateTo).forEach((d) => {
-          if (Number(d.slice(0, 4)) !== reportYear || Number(d.slice(5, 7)) - 1 !== mIdx) return;
-          const dayNum = Number(d.slice(8, 10));
-          days[dayNum - 1].count += 1; days[dayNum - 1].hours += durationHrs;
-        });
-      });
-    }
     const maxCount = Math.max(1, ...months.map((m) => m.count));
-    const monthTotalCount = reportMonth !== "All" ? months[Number(reportMonth)].count : totalCount;
-    const monthTotalHours = reportMonth !== "All" ? months[Number(reportMonth)].hours : totalHours;
-    return { months, days, totalCount: monthTotalCount, totalHours: monthTotalHours, maxCount, dayMax: days ? Math.max(1, ...days.map((d) => d.count)) : 1 };
-  }, [bookings, reportHall, reportYear, reportMonth]);
+
+    // Date-range view: overrides the year view above when a "From" date is set.
+    const hasRange = !!reportDateFrom;
+    let rangeMode = null, rangeBuckets = null, rangeTotalCount = 0, rangeTotalHours = 0;
+    if (hasRange) {
+      const rangeFrom = reportDateFrom;
+      const rangeTo = reportDateTo && reportDateTo >= reportDateFrom ? reportDateTo : reportDateFrom;
+      const spanDays = daySpan(rangeFrom, rangeTo);
+
+      if (spanDays <= 92) {
+        rangeMode = "daily";
+        const dateKeys = getDateList(rangeFrom, rangeTo, 400);
+        const idxByDate = {};
+        rangeBuckets = dateKeys.map((d, i) => { idxByDate[d] = i; return { key: d, label: fmtDateShort(d), count: 0, hours: 0 }; });
+        filteredBookings.forEach((b) => {
+          const durationHrs = (toMinutes(b.endTime) - toMinutes(b.startTime)) / 60;
+          getDateList(b.dateFrom, b.dateTo).forEach((d) => {
+            if (d < rangeFrom || d > rangeTo) return;
+            const idx = idxByDate[d];
+            if (idx === undefined) return;
+            rangeBuckets[idx].count += 1; rangeBuckets[idx].hours += durationHrs;
+            rangeTotalCount += 1; rangeTotalHours += durationHrs;
+          });
+        });
+      } else {
+        rangeMode = "monthly";
+        const keys = [];
+        let cursor = rangeFrom.slice(0, 7);
+        const endKey = rangeTo.slice(0, 7);
+        while (cursor <= endKey && keys.length < 240) {
+          keys.push(cursor);
+          const [y, m] = cursor.split("-").map(Number);
+          const next = new Date(Date.UTC(y, m, 1)); // m is already 1-indexed here, so this advances one month
+          cursor = `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, "0")}`;
+        }
+        const idxByKey = {};
+        rangeBuckets = keys.map((k, i) => {
+          idxByKey[k] = i;
+          const [y, m] = k.split("-");
+          return { key: k, label: new Date(Number(y), Number(m) - 1, 1).toLocaleString("en-IN", { month: "short", year: "2-digit" }), count: 0, hours: 0 };
+        });
+        filteredBookings.forEach((b) => {
+          const durationHrs = (toMinutes(b.endTime) - toMinutes(b.startTime)) / 60;
+          getDateList(b.dateFrom, b.dateTo).forEach((d) => {
+            if (d < rangeFrom || d > rangeTo) return;
+            const idx = idxByKey[d.slice(0, 7)];
+            if (idx === undefined) return;
+            rangeBuckets[idx].count += 1; rangeBuckets[idx].hours += durationHrs;
+            rangeTotalCount += 1; rangeTotalHours += durationHrs;
+          });
+        });
+      }
+    }
+    const rangeMax = rangeBuckets ? Math.max(1, ...rangeBuckets.map((x) => x.count)) : 1;
+
+    return {
+      months, maxCount,
+      totalCount: hasRange ? rangeTotalCount : yearTotalCount,
+      totalHours: hasRange ? rangeTotalHours : yearTotalHours,
+      hasRange, rangeMode, rangeBuckets, rangeMax,
+    };
+  }, [bookings, reportHalls, reportYear, reportDateFrom, reportDateTo]);
 
   const years = useMemo(() => {
     const s = new Set();
@@ -863,19 +922,31 @@ function App() {
 
         {view === "reports" && (
           <div>
-            <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
-              <select value={reportHall} onChange={(e) => setReportHall(e.target.value)} style={{ padding: "8px 12px", borderRadius: 6, background: "#161c23", border: "1px solid #2a3138", color: "#e8ecef", fontSize: 13 }}>
-                <option value="All">All Halls</option>
-                {halls.map((h) => <option key={h} value={h}>{h}</option>)}
-              </select>
+            <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+              {["All", ...halls].map((h) => {
+                const active = h === "All" ? reportHalls.length === halls.length : reportHalls.includes(h);
+                const c = h === "All" ? { accent: "#d4a94a", bg: "#2a2313", text: "#d4a94a" } : hallColor(h);
+                return (
+                  <button key={h} onClick={() => toggleReportHall(h)} style={{
+                    padding: "6px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                    border: active ? `1px solid ${c.accent}` : "1px solid #2a3138",
+                    background: active ? c.bg : "transparent", color: active ? c.text : "#8b959e",
+                  }}>{h}</button>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
               <select value={reportYear} onChange={(e) => setReportYear(Number(e.target.value))} style={{ padding: "8px 12px", borderRadius: 6, background: "#161c23", border: "1px solid #2a3138", color: "#e8ecef", fontSize: 13 }}>
                 {years.map((y) => <option key={y} value={y}>{y}</option>)}
               </select>
-              <select value={reportMonth} onChange={(e) => setReportMonth(e.target.value)} style={{ padding: "8px 12px", borderRadius: 6, background: "#161c23", border: "1px solid #2a3138", color: "#e8ecef", fontSize: 13 }}>
-                <option value="All">All Months</option>
-                {reportData.months.map((m, i) => <option key={m.month} value={i}>{m.month}</option>)}
-              </select>
+              <span style={{ fontSize: 11, color: "#5d6670" }}>or a specific range:</span>
+              <input type="date" value={reportDateFrom} onChange={(e) => setReportDateFrom(e.target.value)} style={{ padding: "8px 12px", borderRadius: 6, background: "#161c23", border: "1px solid #2a3138", color: "#e8ecef", fontSize: 13 }} />
+              <span style={{ fontSize: 12, color: "#5d6670" }}>to</span>
+              <input type="date" value={reportDateTo} min={reportDateFrom} onChange={(e) => setReportDateTo(e.target.value)} style={{ padding: "8px 12px", borderRadius: 6, background: "#161c23", border: "1px solid #2a3138", color: "#e8ecef", fontSize: 13 }} />
+              {reportData.hasRange && <button onClick={clearReportRange} style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #2a3138", background: "transparent", color: "#8b959e", fontSize: 12, cursor: "pointer" }}>Clear range</button>}
             </div>
+            <div style={{ fontSize: 11, color: "#5d6670", marginBottom: 20 }}>{reportData.hasRange ? "Showing the selected date range — the Year dropdown is unused while a range is set." : "Showing the full selected year. Set a date range above for a specific window instead."}</div>
+
             <div style={{ display: "flex", gap: 14, marginBottom: 24, flexWrap: "wrap" }}>
               <div style={{ flex: 1, minWidth: 140, padding: 16, borderRadius: 8, background: "#161c23", border: "1px solid #23292f" }}>
                 <div style={{ fontSize: 11, color: "#7d8891", textTransform: "uppercase", letterSpacing: 1 }}>Booking-Days</div>
@@ -886,7 +957,7 @@ function App() {
                 <div style={{ fontSize: 28, fontWeight: 700, color: "#3ecfae", marginTop: 4 }}>{reportData.totalHours.toFixed(1)}</div>
               </div>
             </div>
-            {reportMonth === "All" ? (
+            {!reportData.hasRange ? (
               <>
                 <div style={{ fontSize: 12, fontWeight: 700, color: "#8b959e", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Monthly Breakdown — {reportYear}</div>
                 <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 160, padding: "0 4px", borderBottom: "1px solid #2a3138" }}>
@@ -903,17 +974,19 @@ function App() {
               </>
             ) : (
               <>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "#8b959e", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Daily Breakdown — {reportData.months[Number(reportMonth)].month} {reportYear}</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#8b959e", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>
+                  {reportData.rangeMode === "daily" ? "Daily" : "Monthly"} Breakdown — {fmtDate(reportDateFrom)} to {fmtDate(reportDateTo && reportDateTo >= reportDateFrom ? reportDateTo : reportDateFrom)}
+                </div>
                 <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 160, padding: "0 4px", borderBottom: "1px solid #2a3138", overflowX: "auto" }}>
-                  {reportData.days.map((d) => (
-                    <div key={d.day} style={{ flex: "1 0 18px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
-                      <div style={{ fontSize: 9, color: "#7d8891", marginBottom: 4 }}>{d.count || ""}</div>
-                      <div style={{ width: "70%", height: `${(d.count / reportData.dayMax) * 100}%`, minHeight: d.count > 0 ? 4 : 0, background: "linear-gradient(180deg, #3ecfae, #1f7a68)", borderRadius: "3px 3px 0 0" }} title={`${d.day}: ${d.count} booking-day(s), ${d.hours.toFixed(1)}h`} />
+                  {reportData.rangeBuckets.map((bkt) => (
+                    <div key={bkt.key} style={{ flex: "1 0 22px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                      <div style={{ fontSize: 9, color: "#7d8891", marginBottom: 4 }}>{bkt.count || ""}</div>
+                      <div style={{ width: "70%", height: `${(bkt.count / reportData.rangeMax) * 100}%`, minHeight: bkt.count > 0 ? 4 : 0, background: "linear-gradient(180deg, #3ecfae, #1f7a68)", borderRadius: "3px 3px 0 0" }} title={`${bkt.label}: ${bkt.count} booking-day(s), ${bkt.hours.toFixed(1)}h`} />
                     </div>
                   ))}
                 </div>
                 <div style={{ display: "flex", gap: 3, padding: "6px 4px 0" }}>
-                  {reportData.days.map((d) => <div key={d.day} style={{ flex: "1 0 18px", textAlign: "center", fontSize: 8, color: "#6b7580" }}>{d.day}</div>)}
+                  {reportData.rangeBuckets.map((bkt) => <div key={bkt.key} style={{ flex: "1 0 22px", textAlign: "center", fontSize: 8, color: "#6b7580" }}>{bkt.label}</div>)}
                 </div>
               </>
             )}
