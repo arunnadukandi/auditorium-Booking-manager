@@ -295,21 +295,18 @@ function App() {
   const [consolidateStatus, setConsolidateStatus] = useState("");
 
   const loadData = useCallback(async (isBackground) => {
+    if (!isBackground) setLoading(true);
+    const bookingsPromise = Store.get(STORAGE_KEY).catch(() => null);
+    const logPromise = Store.get(LOG_KEY).catch(() => null);
+    const pinPromise = Store.get(PIN_KEY).catch(() => null);
+
+    // Bookings is the primary view — resolve and display it as soon as it's
+    // ready, without waiting on the (larger, slower) activity log or PIN.
     try {
-      if (!isBackground) setLoading(true);
-      const [bRaw, lRaw, pRaw] = await Promise.all([
-        Store.get(STORAGE_KEY).catch(() => null),
-        Store.get(LOG_KEY).catch(() => null),
-        Store.get(PIN_KEY).catch(() => null),
-      ]);
-      let fetchedBookings = bRaw ? JSON.parse(bRaw).map(normalizeBooking) : null;
-      if (!isBackground && fetchedBookings && JSON.stringify(fetchedBookings) !== bRaw) {
-        await Store.set(STORAGE_KEY, JSON.stringify(fetchedBookings)).catch(() => {});
-      }
+      const bRaw = await bookingsPromise;
+      const fetchedBookings = bRaw ? JSON.parse(bRaw).map(normalizeBooking) : null;
       const shouldApplyBookings = fetchedBookings !== null && !(isBackground && fetchedBookings.length === 0 && bookings.length > 0);
       if (shouldApplyBookings) setBookings(fetchedBookings);
-      if (lRaw) setActivityLog(JSON.parse(lRaw));
-      if (pRaw) setAdminPin(pRaw);
       setLastSync(new Date());
       setError("");
       failCountRef.current = 0;
@@ -321,6 +318,16 @@ function App() {
     } finally {
       if (!isBackground) setLoading(false);
     }
+
+    // Secondary data — applied whenever it arrives, doesn't hold up the UI above.
+    try {
+      const lRaw = await logPromise;
+      if (lRaw) setActivityLog(JSON.parse(lRaw));
+    } catch (e) {}
+    try {
+      const pRaw = await pinPromise;
+      if (pRaw) setAdminPin(pRaw);
+    } catch (e) {}
   }, [bookings.length]);
 
   useEffect(() => {
