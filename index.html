@@ -978,11 +978,16 @@ function App() {
             {!reportData.hasRange ? (
               <>
                 <div style={{ fontSize: 12, fontWeight: 700, color: "#8b959e", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Monthly Breakdown — {reportYear}</div>
-                <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 160, padding: "0 4px", borderBottom: "1px solid #2a3138" }}>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 170, padding: "0 4px", borderBottom: "1px solid #2a3138" }}>
                   {reportData.months.map((m) => (
                     <div key={m.month} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
-                      <div style={{ fontSize: 10, color: "#7d8891", marginBottom: 4 }}>{m.count || ""}</div>
-                      <div style={{ width: "70%", height: `${(m.count / reportData.maxCount) * 100}%`, minHeight: m.count > 0 ? 4 : 0, background: "linear-gradient(180deg, #d4a94a, #a87f2e)", borderRadius: "3px 3px 0 0" }} />
+                      {m.count > 0 && (
+                        <div style={{ fontSize: 9, color: "#7d8891", marginBottom: 4, textAlign: "center", lineHeight: 1.3 }}>
+                          <div>{m.count}</div>
+                          <div style={{ color: "#5d6670" }}>{m.hours.toFixed(1)}h</div>
+                        </div>
+                      )}
+                      <div style={{ width: "70%", height: `${(m.count / reportData.maxCount) * 100}%`, minHeight: m.count > 0 ? 4 : 0, background: "linear-gradient(180deg, #d4a94a, #a87f2e)", borderRadius: "3px 3px 0 0" }} title={`${m.month}: ${m.count} booking(s), ${m.hours.toFixed(1)}h`} />
                     </div>
                   ))}
                 </div>
@@ -995,16 +1000,21 @@ function App() {
                 <div style={{ fontSize: 12, fontWeight: 700, color: "#8b959e", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>
                   {reportData.rangeMode === "daily" ? "Daily" : "Monthly"} Breakdown — {fmtDate(reportDateFrom)} to {fmtDate(reportDateTo && reportDateTo >= reportDateFrom ? reportDateTo : reportDateFrom)}
                 </div>
-                <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 160, padding: "0 4px", borderBottom: "1px solid #2a3138", overflowX: "auto" }}>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 170, padding: "0 4px", borderBottom: "1px solid #2a3138", overflowX: "auto" }}>
                   {reportData.rangeBuckets.map((bkt) => (
-                    <div key={bkt.key} style={{ flex: "1 0 22px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
-                      <div style={{ fontSize: 9, color: "#7d8891", marginBottom: 4 }}>{bkt.count || ""}</div>
+                    <div key={bkt.key} style={{ flex: "1 0 30px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                      {bkt.count > 0 && (
+                        <div style={{ fontSize: 8, color: "#7d8891", marginBottom: 4, textAlign: "center", lineHeight: 1.3 }}>
+                          <div>{bkt.count}</div>
+                          <div style={{ color: "#5d6670" }}>{bkt.hours.toFixed(1)}h</div>
+                        </div>
+                      )}
                       <div style={{ width: "70%", height: `${(bkt.count / reportData.rangeMax) * 100}%`, minHeight: bkt.count > 0 ? 4 : 0, background: "linear-gradient(180deg, #3ecfae, #1f7a68)", borderRadius: "3px 3px 0 0" }} title={`${bkt.label}: ${bkt.count} booking-day(s), ${bkt.hours.toFixed(1)}h`} />
                     </div>
                   ))}
                 </div>
                 <div style={{ display: "flex", gap: 3, padding: "6px 4px 0" }}>
-                  {reportData.rangeBuckets.map((bkt) => <div key={bkt.key} style={{ flex: "1 0 22px", textAlign: "center", fontSize: 8, color: "#6b7580" }}>{bkt.label}</div>)}
+                  {reportData.rangeBuckets.map((bkt) => <div key={bkt.key} style={{ flex: "1 0 30px", textAlign: "center", fontSize: 8, color: "#6b7580" }}>{bkt.label}</div>)}
                 </div>
               </>
             )}
