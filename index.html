@@ -267,6 +267,11 @@ function App() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const failCountRef = useRef(0);
+  // True only once a bookings fetch has genuinely succeeded (even if the
+  // result was legitimately empty) — writes are refused until this is true,
+  // so a failed initial load can never look like "zero bookings exist" and
+  // get silently overwritten by the next save.
+  const bookingsReadyRef = useRef(false);
   const fileInputRef = useRef(null);
 
   const [session, setSession] = useState(null);
@@ -296,7 +301,7 @@ function App() {
 
   const loadData = useCallback(async (isBackground) => {
     if (!isBackground) setLoading(true);
-    const bookingsPromise = Store.get(STORAGE_KEY).catch(() => null);
+    const bookingsPromise = Store.get(STORAGE_KEY); // NOT caught here — a real failure must not look like "zero bookings"
     const logPromise = Store.get(LOG_KEY).catch(() => null);
     const pinPromise = Store.get(PIN_KEY).catch(() => null);
 
@@ -304,9 +309,18 @@ function App() {
     // ready, without waiting on the (larger, slower) activity log or PIN.
     try {
       const bRaw = await bookingsPromise;
-      const fetchedBookings = bRaw ? JSON.parse(bRaw).map(normalizeBooking) : null;
-      const shouldApplyBookings = fetchedBookings !== null && !(isBackground && fetchedBookings.length === 0 && bookings.length > 0);
+      // bRaw === null here means the server read the sheet and genuinely found
+      // zero bookings — that's real information now, not a swallowed failure,
+      // so it's safe to trust and apply.
+      const fetchedBookings = bRaw ? JSON.parse(bRaw).map(normalizeBooking) : [];
+      // Reject the result of a background poll if it looks like a suspicious
+      // large drop from what we already trust — not just a drop to exactly
+      // zero. A real loss of most bookings between two 20-second polls is
+      // far more likely to be a bad read than a legitimate mass deletion.
+      const suspiciousDrop = isBackground && bookings.length > 3 && fetchedBookings.length < bookings.length * 0.5;
+      const shouldApplyBookings = !suspiciousDrop;
       if (shouldApplyBookings) setBookings(fetchedBookings);
+      bookingsReadyRef.current = true;
       setLastSync(new Date());
       setError("");
       failCountRef.current = 0;
@@ -345,6 +359,14 @@ function App() {
   }
 
   const persistBookings = async (next) => {
+    if (!bookingsReadyRef.current) {
+      // Refuse to write against a baseline we're not sure is real. Writing
+      // here is exactly how a failed initial load turns into silently
+      // wiping the entire shared history — this check is the one thing
+      // standing between a transient network blip and permanent data loss.
+      setError("Bookings haven't finished loading yet — please wait a few seconds and try again before saving.");
+      throw new Error("Refused to save: bookings not yet loaded.");
+    }
     setBookings(next);
     try {
       await withRetry(() => Store.set(STORAGE_KEY, JSON.stringify(next)));
@@ -362,6 +384,13 @@ function App() {
       // writing a stale/short copy back would silently truncate the real history.
       const raw = await Store.get(LOG_KEY);
       const current = raw ? JSON.parse(raw) : [];
+      // Defense-in-depth: if the server claims far fewer entries than we already
+      // know exist locally, don't trust it — this exact ambiguity (can't tell a
+      // real empty from a bad read) is what wiped data before.
+      if (current.length === 0 && activityLog.length > 3) {
+        setActivityLog((prev) => [entry, ...prev].slice(0, 300));
+        return;
+      }
       const next = [entry, ...current].slice(0, 300);
       setActivityLog(next);
       await withRetry(() => Store.set(LOG_KEY, JSON.stringify(next)));
