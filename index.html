@@ -527,8 +527,12 @@ function App() {
     setNotionSyncStatus("");
     try {
       const result = await Store.syncNotion();
-      setNotionSyncStatus(`Synced ${result.count} record(s) to Notion just now.`);
-      await logAction("manual_notion_sync", `Manually synced ${result.count} record(s) to Notion (on-demand, outside the weekly schedule)`);
+      if (result.incomplete) {
+        setNotionSyncStatus(`Synced ${result.bookingsProcessed}/${result.bookingsTouched} booking(s) (${result.count} row(s)) — ran out of time. ${result.bookingsRemaining} remaining — tap Sync Now again to continue.`);
+      } else {
+        setNotionSyncStatus(`Synced ${result.bookingsTouched} booking(s) (${result.count} row(s)) to Notion just now.`);
+      }
+      await logAction("manual_notion_sync", `Manually synced ${result.count} row(s) to Notion${result.incomplete ? ` (partial — ${result.bookingsRemaining} remaining)` : ""}`);
     } catch (e) {
       setNotionSyncStatus("Sync failed: " + e.message);
     } finally {
