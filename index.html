@@ -63,6 +63,13 @@ const Store = {
     if (data.error) throw new Error(data.error);
     return data;
   },
+  async syncNotion() {
+    const res = await fetch(`${this._baseUrl()}?action=syncNotion`);
+    if (!res.ok) throw new Error("Notion sync request failed: " + res.status);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    return data; // { success, count, syncedAt }
+  },
 };
 
 // ---------- Minimal icon stand-ins (no icon library dependency) ----------
@@ -508,6 +515,25 @@ function App() {
     setAdminPin(newPin.trim());
     await logAction("change_admin_pin", "Admin PIN updated");
     setNewPin(""); setShowSettings(false);
+  };
+
+  const [notionSyncing, setNotionSyncing] = useState(false);
+  const [notionSyncStatus, setNotionSyncStatus] = useState("");
+  // On-demand sync, in addition to the weekly automatic schedule — same
+  // underlying function the scheduled trigger calls, just invoked now instead
+  // of waiting for Sunday.
+  const handleSyncNotionNow = async () => {
+    setNotionSyncing(true);
+    setNotionSyncStatus("");
+    try {
+      const result = await Store.syncNotion();
+      setNotionSyncStatus(`Synced ${result.count} record(s) to Notion just now.`);
+      await logAction("manual_notion_sync", `Manually synced ${result.count} record(s) to Notion (on-demand, outside the weekly schedule)`);
+    } catch (e) {
+      setNotionSyncStatus("Sync failed: " + e.message);
+    } finally {
+      setNotionSyncing(false);
+    }
   };
 
   // Both admin-only, both logged — a Print/Export of the register is itself
@@ -1211,6 +1237,15 @@ function App() {
               <button onClick={handleConsolidate} style={{ width: "100%", padding: 9, borderRadius: 6, border: "1px solid #d4a94a", background: "transparent", color: "#d4a94a", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Merge consecutive same-event bookings</button>
               {consolidateStatus && <div style={{ marginTop: 8, fontSize: 11, color: "#8fe8c4" }}>{consolidateStatus}</div>}
               <div style={{ marginTop: 8, fontSize: 11, color: "#5d6670" }}>Finds separate single-day entries with the same hall, purpose, and time on consecutive dates and merges them into one real multi-day booking.</div>
+            </div>
+
+            <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #2a3138" }}>
+              <div style={{ fontSize: 12, color: "#8b959e", marginBottom: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1 }}>Notion Sync</div>
+              <button onClick={handleSyncNotionNow} disabled={notionSyncing} style={{ width: "100%", padding: 9, borderRadius: 6, border: "1px solid #3ecfae", background: "transparent", color: notionSyncing ? "#5d6670" : "#3ecfae", fontWeight: 600, fontSize: 12, cursor: notionSyncing ? "default" : "pointer" }}>
+                {notionSyncing ? "Syncing…" : "Sync Now"}
+              </button>
+              {notionSyncStatus && <div style={{ marginTop: 8, fontSize: 11, color: notionSyncStatus.startsWith("Sync failed") ? "#f0a8a8" : "#8fe8c4" }}>{notionSyncStatus}</div>}
+              <div style={{ marginTop: 8, fontSize: 11, color: "#5d6670" }}>Pushes the current confirmed register to Notion immediately, in addition to the automatic weekly sync (Sundays). Useful right after a batch of changes you don't want to wait until Sunday for.</div>
             </div>
           </div>
         </div>
